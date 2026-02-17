@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 import token
 import tokenize
 
@@ -131,7 +132,8 @@ class ArbitraryPrecisionCalculatorEngine:
         return self._format_result(self._last_value, self._working_digits)
 
     def _evaluate_with_digits(self, expression: str, digits: int):
-        with mp.workdps(max(25, digits + 12)):
+        internal_dps = max(40, digits * 2 + 10)
+        with mp.workdps(internal_dps):
             if not expression or not expression.strip():
                 raise ValueError("Expresión vacía")
 
@@ -151,12 +153,19 @@ class ArbitraryPrecisionCalculatorEngine:
     def _promote_numeric_literals(expression: str) -> str:
         tokens = []
         stream = io.StringIO(expression)
+        previous_token_text = ""
 
         for tok in tokenize.generate_tokens(stream.readline):
             if tok.type == token.NUMBER and not tok.string.lower().endswith("j"):
-                promoted = f'mpf("{tok.string}")'
+                is_integer_literal = bool(re.fullmatch(r"\d+", tok.string))
+                if is_integer_literal and previous_token_text == "**":
+                    promoted = tok.string
+                else:
+                    promoted = f'mpf("{tok.string}")'
                 tok = tokenize.TokenInfo(tok.type, promoted, tok.start, tok.end, tok.line)
             tokens.append(tok)
+            if tok.type in {token.OP, token.NUMBER, token.NAME, token.STRING}:
+                previous_token_text = tok.string
 
         return tokenize.untokenize(tokens)
 
@@ -196,7 +205,19 @@ class ArbitraryPrecisionCalculatorEngine:
 
             exponent = int(mp.floor(mp.log10(abs(value))))
             if abs(exponent) >= ArbitraryPrecisionCalculatorEngine.SCI_NOTATION_EXP_LIMIT:
-                return mp.nstr(value, n=digits, min_fixed=0, max_fixed=0)
+                scientific = mp.nstr(value, n=digits, min_fixed=0, max_fixed=0)
+                if (
+                    ".0e" in scientific
+                    and mp.fmod(value, 10) != 0
+                ):
+                    return mp.nstr(
+                        value,
+                        n=digits,
+                        min_fixed=0,
+                        max_fixed=0,
+                        strip_zeros=False,
+                    )
+                return scientific
 
             return mp.nstr(value, n=digits)
 

@@ -25,8 +25,9 @@ class ResultDisplay:
     DRAG_THRESHOLD = 8      # píxeles por carácter al arrastrar
     PREFETCH_MARGIN = 15    # solicitar más precisión antes del final
     SCI_FRACTION_WINDOW = 30
-    VISIBLE_CHARS = 15       # caracteres visibles en el campo de resultado
-    SHOW_SHIFTED_SEPARATOR = True  # muestra separador visual en modo desplazado
+    VISIBLE_CHARS = 17       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
+    SHOW_SHIFTED_SEPARATOR = False  # muestra separador visual en modo desplazado
+    PLAIN_TAIL_LAST_EXPONENT = 4
 
     _SCI_RE = re.compile(
         r"^(?P<sign>[+-]?)(?P<int>\d)(?:\.(?P<frac>\d+))?[eE](?P<exp>[+-]?\d+)$"
@@ -217,11 +218,43 @@ class ResultDisplay:
         self._maybe_request_more(direction)
 
     def _advance_scientific(self, direction: int):
+        if (
+            direction > 0
+            and self._sci_shift == 0
+            and self._initial_text_fits_visible_window()
+        ):
+            self._render_scientific()
+            return
+
+        if direction > 0 and self._should_render_plain_tail(self._sci_shift):
+            self._render_scientific()
+            return
+
         if direction > 0:
-            candidate = self._sci_shift + 1
+            virtual_digits = self._virtual_digits_for_shifting()
+            max_shift = max(0, len(virtual_digits) - 1)
+            candidate = min(self._sci_shift + 1, max_shift)
             if candidate > 0:
                 _, is_full_width = self._build_shifted_scientific_text(candidate)
-                if is_full_width:
+                allow_underfull = self._allow_underfull_progress(candidate)
+                candidate_exp = self._shifted_exponent(candidate)
+                min_exp = self._minimum_shifted_exponent()
+                below_min_exp = (
+                    min_exp is not None
+                    and candidate_exp is not None
+                    and candidate_exp < min_exp
+                )
+                reaches_min_exp = (
+                    min_exp is not None
+                    and candidate_exp is not None
+                    and candidate_exp == min_exp
+                )
+                if not below_min_exp and (
+                    is_full_width
+                    or self._should_render_plain_tail(candidate)
+                    or allow_underfull
+                    or reaches_min_exp
+                ):
                     self._sci_shift = candidate
         elif direction < 0:
             self._sci_shift = max(0, self._sci_shift - 1)
@@ -231,6 +264,18 @@ class ResultDisplay:
 
     def _maybe_request_more_scientific(self, direction: int):
         if direction <= 0:
+            return
+        if self._sci_shift == 0 and self._initial_text_fits_visible_window():
+            return
+        if self._should_render_plain_tail(self._sci_shift):
+            return
+        min_exp = self._minimum_shifted_exponent()
+        current_exp = self._shifted_exponent(self._sci_shift)
+        if (
+            min_exp is not None
+            and current_exp is not None
+            and current_exp <= min_exp
+        ):
             return
         if self._request_more_callback is None:
             return
@@ -252,18 +297,22 @@ class ResultDisplay:
             return
 
         shift = max(0, self._sci_shift)
-        while shift > 0:
-            _, is_full_width = self._build_shifted_scientific_text(shift)
-            if is_full_width:
-                break
-            shift -= 1
+        if not self._allow_underfull_progress(shift):
+            while shift > 0:
+                _, is_full_width = self._build_shifted_scientific_text(shift)
+                if is_full_width:
+                    break
+                shift -= 1
 
         self._sci_shift = shift
         if shift == 0:
             text = self._sci_initial_text
         else:
-            _, next_is_full_width = self._build_shifted_scientific_text(shift + 1)
-            at_terminal_shift = not next_is_full_width
+            if self._can_render_plain_tail():
+                at_terminal_shift = self._should_render_plain_tail(shift)
+            else:
+                _, next_is_full_width = self._build_shifted_scientific_text(shift + 1)
+                at_terminal_shift = not next_is_full_width
             text, _ = self._build_shifted_scientific_text(
                 shift,
                 prefer_plain_tail=at_terminal_shift,
@@ -288,7 +337,6 @@ class ResultDisplay:
         else:
             frac_len = budget - 2
             frac = self._sci_digits[1 : 1 + frac_len]
-            frac = frac.rstrip("0")
             mantissa = f"{self._sci_digits[0]}.{frac}" if frac else self._sci_digits[0]
 
         return f"{self._sci_sign}{mantissa}{exp_text}"
@@ -301,27 +349,130 @@ class ResultDisplay:
             return max(0, shift - 1)
         return shift
 
+    def _virtual_digits_for_shifting(self) -> str:
+        digits = self._sci_digits
+        if not digits:
+            return ""
+
+        scale = max(0, self._sci_exponent - (len(digits) - 1))
+        if scale <= 0:
+            return digits
+
+        if not self._can_render_plain_tail():
+            return digits
+
+        return digits + ("0" * scale)
+
+    def _initial_text_fits_visible_window(self) -> bool:
+        if self._sci_source_kind != "decimal":
+            return False
+
+        text = self._sci_initial_text.strip()
+        if not text:
+            return True
+
+        return len(text) <= self._visible_capacity_chars()
+
+    @staticmethod
+    def _count_trailing_zeros(text: str) -> int:
+        count = 0
+        for ch in reversed(text):
+            if ch != "0":
+                break
+            count += 1
+        return count
+
+    def _integer_trailing_zeros(self) -> int | None:
+        digits = self._sci_digits
+        if not digits:
+            return 0
+
+        trailing_in_digits = self._count_trailing_zeros(digits)
+        scale = self._sci_exponent - (len(digits) - 1)
+
+        if scale < 0 and trailing_in_digits < -scale:
+            return None
+
+        return max(0, trailing_in_digits + scale)
+
+    def _can_render_plain_tail(self) -> bool:
+        trailing_zeros = self._integer_trailing_zeros()
+        if trailing_zeros is None:
+            return False
+
+        zero_threshold = self._visible_capacity_chars() // 2
+        return trailing_zeros <= zero_threshold
+
+    def _minimum_shifted_exponent(self) -> int | None:
+        trailing_zeros = self._integer_trailing_zeros()
+        if trailing_zeros is None:
+            return None
+        if self._can_render_plain_tail():
+            return None
+        return trailing_zeros
+
+    def _has_full_plain_tail_at_shift(self, shift: int) -> bool:
+        if shift <= 0:
+            return False
+
+        virtual_digits = self._virtual_digits_for_shifting()
+        if not virtual_digits:
+            return False
+
+        effective_shift = self._effective_shift(shift)
+        effective_shift = min(max(0, effective_shift), max(0, len(virtual_digits) - 1))
+
+        sign = self._sci_sign
+        core_budget = max(1, self._visible_capacity_chars() - len(sign))
+        core_full = virtual_digits[effective_shift:]
+        return len(core_full) >= core_budget
+
+    def _shifted_exponent(self, shift: int) -> int | None:
+        text, _ = self._build_shifted_scientific_text(shift, prefer_plain_tail=False)
+        marker = text.rfind("e")
+        if marker < 0:
+            return None
+        try:
+            return int(text[marker + 1 :])
+        except ValueError:
+            return None
+
+    def _should_render_plain_tail(self, shift: int) -> bool:
+        if shift <= 0:
+            return False
+        if not self._can_render_plain_tail():
+            return False
+
+        exponent = self._shifted_exponent(shift)
+        if exponent is None:
+            return True
+
+        return exponent <= (self.PLAIN_TAIL_LAST_EXPONENT - 1)
+
+    def _allow_underfull_progress(self, shift: int) -> bool:
+        return shift > 0 and self._can_render_plain_tail()
+
     def _build_shifted_scientific_text(self, shift: int, prefer_plain_tail: bool = False) -> tuple[str, bool]:
         digits = self._sci_digits
         if not digits:
             return "0", False
 
+        virtual_digits = self._virtual_digits_for_shifting()
+
         ellipsis = "…"
         effective_shift = self._effective_shift(shift)
-        effective_shift = min(max(0, effective_shift), max(0, len(digits) - 1))
+        effective_shift = min(max(0, effective_shift), max(0, len(virtual_digits) - 1))
 
         sign = self._sci_sign
         core_budget = max(1, self._visible_capacity_chars() - len(sign))
-        zero_tail = self._sci_exponent - (len(digits) - 1)
-        zero_threshold = self._visible_capacity_chars() // 2
 
         # Mostrar cola fija sin exponente solo en el último estado alcanzable.
-        if prefer_plain_tail and zero_tail >= 0 and zero_tail <= zero_threshold:
-            core_full = digits[effective_shift:] + ("0" * zero_tail)
+        if prefer_plain_tail and self._can_render_plain_tail():
+            core_full = virtual_digits[effective_shift:]
             if len(core_full) < core_budget and effective_shift > 0:
                 missing = core_budget - len(core_full)
                 effective_shift = max(0, effective_shift - missing)
-                core_full = digits[effective_shift:] + ("0" * zero_tail)
+                core_full = virtual_digits[effective_shift:]
             if len(core_full) >= core_budget:
                 core = core_full[-core_budget:]
                 is_full_width = True
@@ -350,7 +501,7 @@ class ResultDisplay:
                 break
             mantissa_digits = new_budget
 
-        available_digits = max(1, len(digits) - effective_shift)
+        available_digits = max(1, len(virtual_digits) - effective_shift)
         shown_digits = min(available_digits, mantissa_digits)
         exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
         exp_text = f"e{exponent:+d}"
@@ -360,7 +511,7 @@ class ResultDisplay:
         exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
         exp_text = f"e{exponent:+d}"
 
-        mantissa = digits[effective_shift : effective_shift + shown_digits]
+        mantissa = virtual_digits[effective_shift : effective_shift + shown_digits]
         if use_separator and len(mantissa) > 1:
             frac = mantissa[1:].rstrip("0")
             mantissa = f"{mantissa[0]}.{frac}" if frac else mantissa[0]
