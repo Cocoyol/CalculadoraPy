@@ -20,21 +20,25 @@ from calculator_engine import CalculatorEngine
 class ResultDisplay:
     """Entry de solo lectura con scroll horizontal gradual."""
 
-    SCROLL_STEPS = 3        # caracteres por evento de rueda
+    SCROLL_STEPS = 1        # caracteres por evento de rueda
     SCROLL_INTERVAL = 25    # ms entre pasos de animación
     DRAG_THRESHOLD = 8      # píxeles por carácter al arrastrar
     PREFETCH_MARGIN = 15    # solicitar más precisión antes del final
     SCI_FRACTION_WINDOW = 30
-    VISIBLE_CHARS = 19       # caracteres visibles en el campo de resultado
+    VISIBLE_CHARS = 15       # caracteres visibles en el campo de resultado
+    SHOW_SHIFTED_SEPARATOR = True  # muestra separador visual en modo desplazado
 
     _SCI_RE = re.compile(
         r"^(?P<sign>[+-]?)(?P<int>\d)(?:\.(?P<frac>\d+))?[eE](?P<exp>[+-]?\d+)$"
+    )
+    _DEC_RE = re.compile(
+        r"^(?P<sign>[+-]?)(?:(?P<int>\d+)(?:\.(?P<frac>\d*))?|\.(?P<only_frac>\d+))$"
     )
 
     def __init__(self, parent, **kw):
         self._request_more_callback = kw.pop("request_more_callback", None)
         self._var = tk.StringVar(value="0")
-        kw.setdefault("width", self.VISIBLE_CHARS)
+        kw.setdefault("width", self.VISIBLE_CHARS + 1)
         self._entry = tk.Entry(parent, textvariable=self._var,
                                state="readonly", **kw)
         self._anim_id = None
@@ -45,6 +49,8 @@ class ResultDisplay:
         self._sci_digits = ""
         self._sci_exponent = 0
         self._sci_shift = 0
+        self._sci_initial_text = "0"
+        self._sci_source_kind = None
         self._setup_bindings()
 
     @property
@@ -61,12 +67,29 @@ class ResultDisplay:
             self._sci_sign = sign
             self._sci_digits = digits
             self._sci_exponent = exponent
+            self._sci_source_kind = "scientific"
             if not preserve_view:
-                self._sci_shift = self._compute_initial_sci_shift()
+                self._sci_shift = 0
+            self._sci_initial_text = self._format_initial_scientific()
+            self._render_scientific()
+            return
+
+        decimal = self._parse_decimal_as_scientific(text)
+        if decimal is not None:
+            sign, digits, exponent = decimal
+            self._sci_mode = True
+            self._sci_sign = sign
+            self._sci_digits = digits
+            self._sci_exponent = exponent
+            self._sci_source_kind = "decimal"
+            if not preserve_view:
+                self._sci_shift = 0
+            self._sci_initial_text = text
             self._render_scientific()
             return
 
         self._sci_mode = False
+        self._sci_source_kind = None
         left_index = self._entry.index("@0")
         self._var.set(text)
         if preserve_view:
@@ -80,10 +103,6 @@ class ResultDisplay:
     def _scroll_to_start(self):
         self._entry.icursor(0)
         self._entry.xview_moveto(0.0)
-
-    def _scroll_to_end(self):
-        self._entry.icursor(len(self._var.get()))
-        self._entry.xview_moveto(1.0)
 
     def _restore_view(self, left_index: int):
         length = len(self._var.get())
@@ -136,10 +155,8 @@ class ResultDisplay:
             )
             return
 
-        before = self._entry.xview()
         self._entry.xview_scroll(direction, "units")
-        after = self._entry.xview()
-        self._maybe_request_more(direction, before, after)
+        self._maybe_request_more(direction)
         self._anim_id = self._entry.after(
             self.SCROLL_INTERVAL,
             lambda: self._scroll_step(direction, remaining - 1),
@@ -171,7 +188,7 @@ class ResultDisplay:
     def _on_release(self, _event):
         self._last_drag_x = None
 
-    def _maybe_request_more(self, direction: int, before: tuple, after: tuple):
+    def _maybe_request_more(self, direction: int):
         if direction <= 0:
             return
         if self._request_more_callback is None:
@@ -196,14 +213,16 @@ class ResultDisplay:
             self._advance_scientific(direction)
             return
 
-        before = self._entry.xview()
         self._entry.xview_scroll(direction, "units")
-        after = self._entry.xview()
-        self._maybe_request_more(direction, before, after)
+        self._maybe_request_more(direction)
 
     def _advance_scientific(self, direction: int):
         if direction > 0:
-            self._sci_shift += 1
+            candidate = self._sci_shift + 1
+            if candidate > 0:
+                _, is_full_width = self._build_shifted_scientific_text(candidate)
+                if is_full_width:
+                    self._sci_shift = candidate
         elif direction < 0:
             self._sci_shift = max(0, self._sci_shift - 1)
 
@@ -233,49 +252,122 @@ class ResultDisplay:
             return
 
         shift = max(0, self._sci_shift)
-        if shift < len(digits):
-            int_part = digits[: shift + 1]
-            frac_part = digits[shift + 1 : shift + 1 + self.SCI_FRACTION_WINDOW]
-        else:
-            int_part = digits + ("0" * (shift - len(digits) + 1))
-            frac_part = "0" * self.SCI_FRACTION_WINDOW
-
-        exponent = self._sci_exponent - shift
-        text = f"{self._sci_sign}{int_part}"
-        if exponent < 0:
-            visible_fraction = min(self.SCI_FRACTION_WINDOW, max(1, -exponent))
-            frac_part = frac_part[:visible_fraction]
-            if len(frac_part) < visible_fraction:
-                frac_part += "0" * (visible_fraction - len(frac_part))
-            text += f".{frac_part}"
-        text += f"e{exponent:+d}"
-        self._var.set(text)
-        self._entry.after(0, self._scroll_to_end)
-
-    def _compute_initial_sci_shift(self) -> int:
-        max_shift = max(0, len(self._sci_digits) - 1)
-        target_chars = self._visible_capacity_chars()
-
-        best_shift = 0
-        for shift in range(max_shift + 1):
-            if self._rendered_sci_length_for_shift(shift) <= target_chars:
-                best_shift = shift
-            else:
+        while shift > 0:
+            _, is_full_width = self._build_shifted_scientific_text(shift)
+            if is_full_width:
                 break
+            shift -= 1
 
-        return best_shift
+        self._sci_shift = shift
+        if shift == 0:
+            text = self._sci_initial_text
+        else:
+            _, next_is_full_width = self._build_shifted_scientific_text(shift + 1)
+            at_terminal_shift = not next_is_full_width
+            text, _ = self._build_shifted_scientific_text(
+                shift,
+                prefer_plain_tail=at_terminal_shift,
+            )
+
+        self._var.set(text)
+        if shift == 0:
+            self._entry.after(0, self._scroll_to_start)
+        else:
+            self._entry.after(0, self._scroll_to_start)
+
+    def _format_initial_scientific(self) -> str:
+        exponent = self._sci_exponent
+        exp_text = f"e{exponent:+d}"
+        budget = max(1, self._visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
+
+        if budget == 1:
+            mantissa = self._sci_digits[0]
+        elif budget == 2:
+            second = self._sci_digits[1:2]
+            mantissa = f"{self._sci_digits[0]}{second}" if second else self._sci_digits[0]
+        else:
+            frac_len = budget - 2
+            frac = self._sci_digits[1 : 1 + frac_len]
+            frac = frac.rstrip("0")
+            mantissa = f"{self._sci_digits[0]}.{frac}" if frac else self._sci_digits[0]
+
+        return f"{self._sci_sign}{mantissa}{exp_text}"
 
     def _visible_capacity_chars(self) -> int:
         return self.VISIBLE_CHARS
 
-    def _rendered_sci_length_for_shift(self, shift: int) -> int:
-        exponent = self._sci_exponent - shift
-        int_len = shift + 1
-        base_len = len(self._sci_sign) + int_len + len(f"e{exponent:+d}")
-        if exponent < 0:
-            visible_fraction = min(self.SCI_FRACTION_WINDOW, max(1, -exponent))
-            return base_len + 1 + visible_fraction
-        return base_len
+    def _effective_shift(self, shift: int) -> int:
+        if self._sci_source_kind == "decimal" and self._sci_exponent < 0:
+            return max(0, shift - 1)
+        return shift
+
+    def _build_shifted_scientific_text(self, shift: int, prefer_plain_tail: bool = False) -> tuple[str, bool]:
+        digits = self._sci_digits
+        if not digits:
+            return "0", False
+
+        ellipsis = "…"
+        effective_shift = self._effective_shift(shift)
+        effective_shift = min(max(0, effective_shift), max(0, len(digits) - 1))
+
+        sign = self._sci_sign
+        core_budget = max(1, self._visible_capacity_chars() - len(sign))
+        zero_tail = self._sci_exponent - (len(digits) - 1)
+        zero_threshold = self._visible_capacity_chars() // 2
+
+        # Mostrar cola fija sin exponente solo en el último estado alcanzable.
+        if prefer_plain_tail and zero_tail >= 0 and zero_tail <= zero_threshold:
+            core_full = digits[effective_shift:] + ("0" * zero_tail)
+            if len(core_full) < core_budget and effective_shift > 0:
+                missing = core_budget - len(core_full)
+                effective_shift = max(0, effective_shift - missing)
+                core_full = digits[effective_shift:] + ("0" * zero_tail)
+            if len(core_full) >= core_budget:
+                core = core_full[-core_budget:]
+                is_full_width = True
+            else:
+                core = core_full
+                is_full_width = False
+            return f"{sign}{ellipsis}{core}", is_full_width
+
+        use_separator = (
+            self.SHOW_SHIFTED_SEPARATOR
+            and self._sci_source_kind == "decimal"
+        )
+
+        mantissa_budget = core_budget
+        if use_separator:
+            mantissa_budget = max(1, mantissa_budget - 1)
+
+        mantissa_digits = max(1, mantissa_budget)
+        for _ in range(4):
+            exponent = self._sci_exponent - (effective_shift + mantissa_digits - 1)
+            exp_text = f"e{exponent:+d}"
+            new_budget = max(1, core_budget - len(exp_text))
+            if use_separator:
+                new_budget = max(1, new_budget - 1)
+            if new_budget == mantissa_digits:
+                break
+            mantissa_digits = new_budget
+
+        available_digits = max(1, len(digits) - effective_shift)
+        shown_digits = min(available_digits, mantissa_digits)
+        exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
+        exp_text = f"e{exponent:+d}"
+
+        max_shown = max(1, core_budget - len(exp_text) - (1 if use_separator else 0))
+        shown_digits = min(shown_digits, max_shown)
+        exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
+        exp_text = f"e{exponent:+d}"
+
+        mantissa = digits[effective_shift : effective_shift + shown_digits]
+        if use_separator and len(mantissa) > 1:
+            frac = mantissa[1:].rstrip("0")
+            mantissa = f"{mantissa[0]}.{frac}" if frac else mantissa[0]
+
+        core = f"{mantissa}{exp_text}"
+        is_full_width = len(core) >= core_budget
+        return f"{sign}{ellipsis}{core}", is_full_width
 
     def _parse_scientific(self, text: str):
         match = self._SCI_RE.fullmatch(text.strip())
@@ -285,6 +377,33 @@ class ResultDisplay:
         sign = match.group("sign")
         digits = match.group("int") + (match.group("frac") or "")
         exponent = int(match.group("exp"))
+        return sign, digits, exponent
+
+    def _parse_decimal_as_scientific(self, text: str):
+        match = self._DEC_RE.fullmatch(text.strip())
+        if not match:
+            return None
+
+        sign = match.group("sign")
+        int_part = match.group("int") if match.group("int") is not None else "0"
+        frac_part = match.group("frac")
+        if frac_part is None:
+            frac_part = match.group("only_frac") or ""
+
+        if set(int_part) == {"0"} and (not frac_part or set(frac_part) == {"0"}):
+            return sign, "0", 0
+
+        first_non_zero_int = next((i for i, c in enumerate(int_part) if c != "0"), None)
+        if first_non_zero_int is not None:
+            exponent = len(int_part) - first_non_zero_int - 1
+            digits = int_part[first_non_zero_int:] + frac_part
+        else:
+            first_non_zero_frac = next((i for i, c in enumerate(frac_part) if c != "0"), None)
+            if first_non_zero_frac is None:
+                return sign, "0", 0
+            exponent = -(first_non_zero_frac + 1)
+            digits = frac_part[first_non_zero_frac:]
+
         return sign, digits, exponent
 
 
