@@ -25,6 +25,7 @@ class ResultDisplay:
     DRAG_THRESHOLD = 8      # píxeles por carácter al arrastrar
     PREFETCH_MARGIN = 15    # solicitar más precisión antes del final
     SCI_FRACTION_WINDOW = 30
+    VISIBLE_CHARS = 19       # caracteres visibles en el campo de resultado
 
     _SCI_RE = re.compile(
         r"^(?P<sign>[+-]?)(?P<int>\d)(?:\.(?P<frac>\d+))?[eE](?P<exp>[+-]?\d+)$"
@@ -33,6 +34,7 @@ class ResultDisplay:
     def __init__(self, parent, **kw):
         self._request_more_callback = kw.pop("request_more_callback", None)
         self._var = tk.StringVar(value="0")
+        kw.setdefault("width", self.VISIBLE_CHARS)
         self._entry = tk.Entry(parent, textvariable=self._var,
                                state="readonly", **kw)
         self._anim_id = None
@@ -264,12 +266,7 @@ class ResultDisplay:
         return best_shift
 
     def _visible_capacity_chars(self) -> int:
-        self._entry.update_idletasks()
-        width_px = max(1, self._entry.winfo_width() - 8)
-        font_value = self._entry.cget("font")
-        font_obj = tkfont.nametofont(font_value)
-        char_px = max(1, font_obj.measure("0"))
-        return max(8, width_px // char_px)
+        return self.VISIBLE_CHARS
 
     def _rendered_sci_length_for_shift(self, shift: int) -> int:
         exponent = self._sci_exponent - shift
@@ -413,7 +410,6 @@ class CalculatorApp:
             readonlybackground=self.C["display_bg"],
             relief="flat", justify="right", bd=0,
         )
-        self.result_display.widget.pack(side="left", fill="x", expand=True)
 
         tk.Button(
             row, text="Copiar", font=self._f_small,
@@ -421,6 +417,8 @@ class CalculatorApp:
             activebackground=self.C["special"], relief="flat",
             cursor="hand2", command=self._copy_result, padx=8,
         ).pack(side="right", padx=(6, 0))
+
+        self.result_display.widget.pack(side="right")
 
     # ── Barra de toggles (RAD/DEG · INV) ────────────────────────
 
@@ -512,6 +510,7 @@ class CalculatorApp:
     def _bind_keyboard(self):
         self.expr_entry.bind("<Return>", lambda _e: self._calculate())
         self.expr_entry.bind("<KP_Enter>", lambda _e: self._calculate())
+        self.root.bind("<Escape>", lambda _e: self._on_key("clear"))
         # Permitir escritura libre en el campo de expresión
 
     # ── Acciones ─────────────────────────────────────────────────
