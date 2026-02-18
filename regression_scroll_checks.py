@@ -156,6 +156,40 @@ def run_regressions() -> None:
 	checks.append(("1/3 initial visible width is 17", len(first) == 17))
 	checks.append(("1/3 after first scroll keeps 17 without ellipsis", len(second.replace("…", "")) == 17))
 
+	engine_3e30 = ArbitraryPrecisionCalculatorEngine(initial_digits=18, precision_step=120)
+	value_3e30 = engine_3e30.evaluate("3*10^-30")
+	_, end_3e30, states_3e30 = _walk("3*10^-30", steps=20, initial_digits=18)
+	display_3e30 = _make_display(value_3e30)
+	expected_actual.append((
+		"3*10^-30",
+		"3e-30",
+		end_3e30,
+	))
+	checks.append((
+		"3e-30 displays without trailing zeros",
+		end_3e30 == "3e-30",
+	))
+	checks.append((
+		"3e-30 produces no scroll states (not scrollable)",
+		len(states_3e30) == 0,
+	))
+	checks.append((
+		"3e-30 copy gives clean notation",
+		display_3e30.get_copy_text() == "3e-30",
+	))
+	checks.append((
+		"3e-30 shift+copy gives flat decimal",
+		display_3e30.get_copy_text(plain_decimal=True) == "0." + "0" * 29 + "3",
+	))
+
+	engine_1e20 = ArbitraryPrecisionCalculatorEngine(initial_digits=18, precision_step=120)
+	value_1e20 = engine_1e20.evaluate("1/10^20")
+	display_1e20 = _make_display(value_1e20)
+	checks.append((
+		"1/10^20 shift+copy gives flat decimal",
+		display_1e20.get_copy_text(plain_decimal=True) == "0." + "0" * 19 + "1",
+	))
+
 	failed = [name for name, ok in checks if not ok]
 	for name, ok in checks:
 		print(f"{name}: {'OK' if ok else 'FAIL'}")

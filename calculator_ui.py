@@ -23,11 +23,11 @@ class ResultDisplay:
     SCROLL_STEPS = 1        # caracteres por evento de rueda
     SCROLL_INTERVAL = 25    # ms entre pasos de animación
     DRAG_THRESHOLD = 8      # píxeles por carácter al arrastrar
-    PREFETCH_MARGIN = 15    # solicitar más precisión antes del final
-    SCI_FRACTION_WINDOW = 30
+    PREFETCH_MARGIN = 30    # solicitar más precisión antes del final
+    SCI_FRACTION_WINDOW = 30    # dígitos de precisión que se muestran en modo científico antes de solicitar más
     VISIBLE_CHARS = 17       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
     SHOW_SHIFTED_SEPARATOR = False  # muestra separador visual en modo desplazado
-    PLAIN_TAIL_LAST_EXPONENT = 4
+    PLAIN_TAIL_LAST_EXPONENT = 4    # último exponente para mostrar cola fija sin exponente en modo desplazado
 
     _SCI_RE = re.compile(
         r"^(?P<sign>[+-]?)(?P<int>\d)(?:\.(?P<frac>\d+))?[eE](?P<exp>[+-]?\d+)$"
@@ -106,6 +106,87 @@ class ResultDisplay:
 
     def get_text(self) -> str:
         return self._var.get()
+
+    def get_copy_text(self, plain_decimal: bool = False) -> str:
+        """Devuelve el texto a copiar: todos los dígitos desde el primero
+        hasta el último visible a la derecha, conservando el exponente.
+
+        Si plain_decimal=True y el número tiene parte fraccionaria, omite
+        el exponente e inserta el punto decimal en su posición absoluta.
+        Cuando el resultado no está desplazado devuelve el texto visible.
+        Cuando está desplazado (hay '…') reconstruye el bloque completo:
+        dígitos ocultos a la izquierda + dígitos visibles + exponente.
+        """
+        if not self._sci_mode or self._sci_shift == 0:
+            # Shift+Copiar sobre número con exponente negativo (ej. 3e-30 → forma plana)
+            if (
+                plain_decimal
+                and self._sci_mode
+                and self._sci_exponent < 0
+                and self._sci_source_kind == "scientific"
+                and not self._is_exact_integer_scientific_value()
+            ):
+                digits = self._sci_digits
+                leading_zeros = abs(self._sci_exponent + 1)  # ceros tras "0."
+                return f"{self._sci_sign}0.{'0' * leading_zeros}{digits}"
+            return self._var.get()
+
+        current_text = self._var.get()
+        sign = self._sci_sign
+        prefix = sign + "\u2026"  # sign + '…'
+        if not current_text.startswith(prefix):
+            return current_text
+
+        content = current_text[len(prefix):]
+        virtual_digits = self._virtual_digits_for_shifting()
+
+        # Caso A: notación científica desplazada con exponente (…XYZe+11)
+        m = re.search(r'[eE]([+-]?\d+)$', content)
+        if m:
+            shown_exponent = int(m.group(1))
+            exp_text = m.group(0)          # conserva el formato exacto, ej. "e+11"
+            total_digits = self._sci_exponent - shown_exponent + 1
+            total_digits = max(1, min(total_digits, len(virtual_digits)))
+
+            if plain_decimal and not self._is_exact_integer_scientific_value():
+                # Forma plana decimal: solo si el punto decimal ya apareció a la
+                # izquierda, es decir, cae dentro de los dígitos significativos
+                # copiados (decimal_pos < total_digits). Si decimal_pos >= total_digits
+                # el punto aún no ha aparecido y se conserva el exponente.
+                digits = virtual_digits[:total_digits]
+                decimal_pos = self._sci_exponent + 1  # cantidad de dígitos enteros
+                if decimal_pos < total_digits:
+                    if decimal_pos <= 0:
+                        return f"{sign}0.{'0' * abs(decimal_pos)}{digits}"
+                    return f"{sign}{digits[:decimal_pos]}.{digits[decimal_pos:]}"
+
+            return f"{sign}{virtual_digits[:total_digits]}{exp_text}"
+
+        # Caso B: ventana decimal plana (…1234.567, sin exponente)
+        if '.' in content:
+            right_edge = self._plain_decimal_right_edge(self._sci_shift)
+            if right_edge is None:
+                return current_text
+            right_edge = min(right_edge, len(virtual_digits))
+            full_digits = virtual_digits[:right_edge]
+            decimal_pos = self._sci_exponent + 1  # dígitos antes del punto decimal
+            if decimal_pos <= 0:
+                return f"{sign}0.{'0' * abs(decimal_pos)}{full_digits}"
+            if decimal_pos >= len(full_digits):
+                return f"{sign}{full_digits}{'0' * (decimal_pos - len(full_digits))}"
+            return f"{sign}{full_digits[:decimal_pos]}.{full_digits[decimal_pos:]}"
+
+        # Caso C: cola fija entera (…12338905, sin exponente ni punto)
+        # content son los dígitos visibles; localizar su extremo derecho en
+        # virtual_digits para no copiar más allá del último dígito visible.
+        visible = content  # dígitos mostrados (sin '…' ni signo)
+        right_edge = len(virtual_digits)
+        if visible:
+            # Buscar la posición más a la derecha donde visible aparece como sufijo
+            idx = virtual_digits.rfind(visible)
+            if idx >= 0:
+                right_edge = idx + len(visible)
+        return f"{sign}{virtual_digits[:right_edge]}"
 
     def _scroll_to_start(self):
         self._entry.icursor(0)
@@ -691,6 +772,7 @@ class ResultDisplay:
 
         sign = match.group("sign")
         digits = match.group("int") + (match.group("frac") or "")
+        digits = digits.rstrip("0") or "0"  # los ceros finales no son significativos
         exponent = int(match.group("exp"))
         return sign, digits, exponent
 
@@ -719,6 +801,7 @@ class ResultDisplay:
             exponent = -(first_non_zero_frac + 1)
             digits = frac_part[first_non_zero_frac:]
 
+        digits = digits.rstrip("0") or "0"  # los ceros finales no son significativos
         return sign, digits, exponent
 
 
@@ -797,6 +880,7 @@ class CalculatorApp:
         self.engine = engine if engine is not None else CalculatorEngine()
         self._inv_mode = False
         self._last_engine_result: str | None = None
+        self._shift_copy = False
 
         self._init_fonts()
         self._create_display()
@@ -846,12 +930,14 @@ class CalculatorApp:
             relief="flat", justify="right", bd=0,
         )
 
-        tk.Button(
+        self._copy_btn = tk.Button(
             row, text="Copiar", font=self._f_small,
             bg=self.C["func"], fg=self.C["func_fg"],
             activebackground=self.C["special"], relief="flat",
             cursor="hand2", command=self._copy_result, padx=8,
-        ).pack(side="right", padx=(6, 0))
+        )
+        self._copy_btn.bind("<Button-1>", self._on_copy_press)
+        self._copy_btn.pack(side="right", padx=(6, 0))
 
         self.result_display.widget.pack(side="right")
 
@@ -1035,8 +1121,13 @@ class CalculatorApp:
 
     # ── Copiar resultado ─────────────────────────────────────────
 
+    def _on_copy_press(self, event):
+        self._shift_copy = bool(event.state & 0x1)  # bit 0 = Shift
+
     def _copy_result(self):
-        text = self.result_display.get_text()
+        plain_decimal = self._shift_copy
+        self._shift_copy = False
+        text = self.result_display.get_copy_text(plain_decimal=plain_decimal)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.expr_entry.focus_set()
