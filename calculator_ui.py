@@ -45,6 +45,8 @@ class ResultDisplay:
         self._anim_id = None
         self._last_drag_x = None
         self._loading_more = False
+        self._precision_exhausted = False
+        self._force_scientific_current_shift = False
         self._sci_mode = False
         self._sci_sign = ""
         self._sci_digits = ""
@@ -61,6 +63,10 @@ class ResultDisplay:
     # ── Texto ────────────────────────────────────────────────────
 
     def set_text(self, text: str, preserve_view: bool = False):
+        if not preserve_view:
+            self._precision_exhausted = False
+            self._force_scientific_current_shift = False
+
         scientific = self._parse_scientific(text)
         if scientific is not None:
             sign, digits, exponent = scientific
@@ -192,6 +198,8 @@ class ResultDisplay:
     def _maybe_request_more(self, direction: int):
         if direction <= 0:
             return
+        if self._precision_exhausted:
+            return
         if self._request_more_callback is None:
             return
         if self._loading_more:
@@ -208,6 +216,12 @@ class ResultDisplay:
 
     def finish_loading_more(self):
         self._loading_more = False
+
+    def mark_precision_exhausted(self):
+        self._precision_exhausted = True
+
+    def reset_precision_exhausted(self):
+        self._precision_exhausted = False
 
     def _scroll_unit(self, direction: int):
         if self._sci_mode:
@@ -226,38 +240,58 @@ class ResultDisplay:
             self._render_scientific()
             return
 
-        if direction > 0 and self._should_render_plain_tail(self._sci_shift):
-            self._render_scientific()
-            return
-
         if direction > 0:
+            if self._is_plain_decimal_dot_start_state():
+                scientific_current, _ = self._build_shifted_scientific_text(
+                    self._sci_shift,
+                    prefer_plain_tail=False,
+                )
+                if scientific_current != self._var.get():
+                    self._force_scientific_current_shift = True
+                    self._render_scientific()
+                    self._maybe_request_more_scientific(direction)
+                    return
+
             virtual_digits = self._virtual_digits_for_shifting()
             max_shift = max(0, len(virtual_digits) - 1)
             candidate = min(self._sci_shift + 1, max_shift)
-            if candidate > 0:
+            current_text = self._var.get()
+            current_plain_right_edge = self._plain_decimal_right_edge(self._sci_shift)
+            current_plain_dot_pos = self._plain_decimal_dot_position(self._sci_shift)
+            while candidate > 0 and candidate <= max_shift:
                 _, is_full_width = self._build_shifted_scientific_text(candidate)
+                plain_decimal = self._should_render_plain_decimal_window(candidate)
                 allow_underfull = self._allow_underfull_progress(candidate)
-                candidate_exp = self._shifted_exponent(candidate)
-                min_exp = self._minimum_shifted_exponent()
-                below_min_exp = (
-                    min_exp is not None
-                    and candidate_exp is not None
-                    and candidate_exp < min_exp
-                )
-                reaches_min_exp = (
-                    min_exp is not None
-                    and candidate_exp is not None
-                    and candidate_exp == min_exp
-                )
-                if not below_min_exp and (
+                if (
                     is_full_width
+                    or plain_decimal
                     or self._should_render_plain_tail(candidate)
                     or allow_underfull
-                    or reaches_min_exp
                 ):
-                    self._sci_shift = candidate
+                    if plain_decimal:
+                        candidate_plain_right_edge = self._plain_decimal_right_edge(candidate)
+                        candidate_plain_dot_pos = self._plain_decimal_dot_position(candidate)
+                        body_width = max(1, self._visible_capacity_chars() - len(self._sci_sign))
+                        if (
+                            current_plain_right_edge is not None
+                            and candidate_plain_right_edge is not None
+                            and current_plain_dot_pos is not None
+                            and candidate_plain_dot_pos is not None
+                            and current_plain_dot_pos < body_width
+                            and candidate_plain_dot_pos < body_width
+                            and candidate_plain_right_edge <= current_plain_right_edge
+                        ):
+                            break
+
+                    candidate_text = self._preview_scientific_text(candidate)
+                    if candidate_text != current_text:
+                        self._sci_shift = candidate
+                        self._force_scientific_current_shift = False
+                        break
+                candidate += 1
         elif direction < 0:
             self._sci_shift = max(0, self._sci_shift - 1)
+            self._force_scientific_current_shift = False
 
         self._render_scientific()
         self._maybe_request_more_scientific(direction)
@@ -265,17 +299,9 @@ class ResultDisplay:
     def _maybe_request_more_scientific(self, direction: int):
         if direction <= 0:
             return
+        if self._precision_exhausted:
+            return
         if self._sci_shift == 0 and self._initial_text_fits_visible_window():
-            return
-        if self._should_render_plain_tail(self._sci_shift):
-            return
-        min_exp = self._minimum_shifted_exponent()
-        current_exp = self._shifted_exponent(self._sci_shift)
-        if (
-            min_exp is not None
-            and current_exp is not None
-            and current_exp <= min_exp
-        ):
             return
         if self._request_more_callback is None:
             return
@@ -290,6 +316,26 @@ class ResultDisplay:
         self._loading_more = True
         self._entry.after(0, self._request_more_callback)
 
+    def _preview_scientific_text(self, shift: int) -> str:
+        if shift <= 0:
+            return self._sci_initial_text
+
+        plain_decimal = self._build_plain_decimal_window_text(shift)
+        if plain_decimal is not None:
+            return plain_decimal[0]
+
+        if self._can_render_plain_tail():
+            at_terminal_shift = self._should_render_plain_tail(shift)
+        else:
+            _, next_is_full_width = self._build_shifted_scientific_text(shift + 1)
+            at_terminal_shift = not next_is_full_width
+
+        text, _ = self._build_shifted_scientific_text(
+            shift,
+            prefer_plain_tail=at_terminal_shift,
+        )
+        return text
+
     def _render_scientific(self):
         digits = self._sci_digits
         if not digits:
@@ -297,7 +343,10 @@ class ResultDisplay:
             return
 
         shift = max(0, self._sci_shift)
-        if not self._allow_underfull_progress(shift):
+        if not (
+            self._allow_underfull_progress(shift)
+            or self._should_render_plain_decimal_window(shift)
+        ):
             while shift > 0:
                 _, is_full_width = self._build_shifted_scientific_text(shift)
                 if is_full_width:
@@ -306,8 +355,15 @@ class ResultDisplay:
 
         self._sci_shift = shift
         if shift == 0:
-            text = self._sci_initial_text
+            text = self._initial_visible_text()
         else:
+            plain_decimal = self._build_plain_decimal_window_text(shift)
+            if plain_decimal is not None and not self._force_scientific_current_shift:
+                text = plain_decimal[0]
+                self._var.set(text)
+                self._entry.after(0, self._scroll_to_start)
+                return
+
             if self._can_render_plain_tail():
                 at_terminal_shift = self._should_render_plain_tail(shift)
             else:
@@ -317,12 +373,31 @@ class ResultDisplay:
                 shift,
                 prefer_plain_tail=at_terminal_shift,
             )
+            self._force_scientific_current_shift = False
 
         self._var.set(text)
         if shift == 0:
             self._entry.after(0, self._scroll_to_start)
         else:
             self._entry.after(0, self._scroll_to_start)
+
+    def _initial_visible_text(self) -> str:
+        text = self._sci_initial_text
+        if self._sci_source_kind != "decimal":
+            return text
+
+        capacity = self._visible_capacity_chars()
+        if len(text) <= capacity:
+            return text
+
+        return text[:capacity]
+
+    def _is_plain_decimal_dot_start_state(self) -> bool:
+        if not self._should_render_plain_decimal_window(self._sci_shift):
+            return False
+
+        dot_pos = self._plain_decimal_dot_position(self._sci_shift)
+        return dot_pos == 0
 
     def _format_initial_scientific(self) -> str:
         exponent = self._sci_exponent
@@ -448,6 +523,95 @@ class ResultDisplay:
             return True
 
         return exponent <= (self.PLAIN_TAIL_LAST_EXPONENT - 1)
+
+    def _should_render_plain_decimal_window(self, shift: int) -> bool:
+        if shift <= 0:
+            return False
+
+        if self._is_exact_integer_scientific_value():
+            return False
+
+        exponent = self._shifted_exponent(shift)
+        if exponent is None:
+            return False
+
+        if exponent > (self.PLAIN_TAIL_LAST_EXPONENT - 1):
+            return False
+
+        effective_shift = self._effective_shift(shift)
+        decimal_index = self._sci_exponent + 1
+        dot_pos = decimal_index - effective_shift
+        return dot_pos >= 0
+
+    def _is_exact_integer_scientific_value(self) -> bool:
+        digits = self._sci_digits
+        if not digits:
+            return False
+
+        return self._sci_exponent >= (len(digits) - 1)
+
+    def _build_plain_decimal_window_text(self, shift: int) -> tuple[str, bool] | None:
+        if not self._should_render_plain_decimal_window(shift):
+            return None
+
+        digits = self._virtual_digits_for_shifting()
+        if not digits:
+            return None
+
+        effective_shift = self._effective_shift(shift)
+        effective_shift = min(max(0, effective_shift), max(0, len(digits) - 1))
+
+        sign = self._sci_sign
+        body_width = max(1, self._visible_capacity_chars() - len(sign))
+        decimal_index = self._sci_exponent + 1
+        dot_pos = decimal_index - effective_shift
+
+        if dot_pos >= body_width:
+            digits_needed = body_width
+            chunk = digits[effective_shift : effective_shift + digits_needed]
+            if not chunk:
+                return None
+            core = chunk
+        else:
+            digits_needed = max(1, body_width - 1)
+            chunk = digits[effective_shift : effective_shift + digits_needed]
+            if not chunk:
+                return None
+            insert_at = min(max(0, dot_pos), len(chunk))
+            core = f"{chunk[:insert_at]}.{chunk[insert_at:]}"
+
+        text = f"{sign}…{core}"
+        return text, len(core) >= body_width
+
+    def _plain_decimal_right_edge(self, shift: int) -> int | None:
+        if not self._should_render_plain_decimal_window(shift):
+            return None
+
+        digits = self._virtual_digits_for_shifting()
+        if not digits:
+            return None
+
+        effective_shift = self._effective_shift(shift)
+        effective_shift = min(max(0, effective_shift), max(0, len(digits) - 1))
+
+        body_width = max(1, self._visible_capacity_chars() - len(self._sci_sign))
+        decimal_index = self._sci_exponent + 1
+        dot_pos = decimal_index - effective_shift
+
+        if dot_pos >= body_width:
+            digits_needed = body_width
+        else:
+            digits_needed = max(1, body_width - 1)
+
+        return min(len(digits), effective_shift + digits_needed)
+
+    def _plain_decimal_dot_position(self, shift: int) -> int | None:
+        if not self._should_render_plain_decimal_window(shift):
+            return None
+
+        effective_shift = self._effective_shift(shift)
+        decimal_index = self._sci_exponent + 1
+        return decimal_index - effective_shift
 
     def _allow_underfull_progress(self, shift: int) -> bool:
         return shift > 0 and self._can_render_plain_tail()
@@ -632,6 +796,7 @@ class CalculatorApp:
 
         self.engine = engine if engine is not None else CalculatorEngine()
         self._inv_mode = False
+        self._last_engine_result: str | None = None
 
         self._init_fonts()
         self._create_display()
@@ -789,6 +954,8 @@ class CalculatorApp:
         if action == "clear":
             self.expr_var.set("")
             self.result_display.set_text("0")
+            self.result_display.reset_precision_exhausted()
+            self._last_engine_result = None
         elif action == "backspace":
             cur = self.expr_var.get()
             pos = self.expr_entry.index(tk.INSERT)
@@ -853,11 +1020,13 @@ class CalculatorApp:
         def _run():
             try:
                 result = self.engine.evaluate(expr)
+                self._last_engine_result = result
                 self.root.after(0, lambda: self.result_display.set_text(result))
             except (ValueError, ZeroDivisionError, OverflowError,
                     ArithmeticError, TypeError) as exc:
                 error_name = type(exc).__name__
                 msg = str(exc) if str(exc) else error_name
+                self._last_engine_result = None
                 self.root.after(0, lambda: self.result_display.set_text(
                     f"Error: {msg}"))
 
@@ -880,6 +1049,11 @@ class CalculatorApp:
         def _run():
             try:
                 updated = self.engine.request_more_precision()
+                if self._last_engine_result is not None and updated == self._last_engine_result:
+                    self.root.after(0, self.result_display.mark_precision_exhausted)
+                    return
+
+                self._last_engine_result = updated
                 self.root.after(0, lambda: self.result_display.set_text(
                     updated,
                     preserve_view=True,

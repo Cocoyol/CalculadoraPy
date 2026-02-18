@@ -7,8 +7,8 @@ from calculator_ui import CalculatorApp
 
 
 USE_ARBITRARY_PRECISION = True
-AP_INITIAL_DIGITS = 30
-AP_PRECISION_STEP = 30
+AP_INITIAL_DIGITS = 120
+AP_PRECISION_STEP = 120
 
 
 def main():
