@@ -236,6 +236,36 @@ def run_regressions() -> None:
 		len(states_5_7) >= 3 and states_5_7[2] == "…1428571428571e-14",
 	))
 
+	value_5_7_1e11 = ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("(5/7)/10^11")
+	display_5_7_1e11 = _make_display(value_5_7_1e11)
+	expected_actual.append((
+		"(5/7)/10^11 shift+copy from initial scientific view",
+		"0.00000000000714285714285",
+		display_5_7_1e11.get_copy_text(plain_decimal=True),
+	))
+	checks.append((
+		"(5/7)/10^11 copy from initial scientific view keeps scientific text",
+		display_5_7_1e11.get_copy_text() == "7.14285714285e-12",
+	))
+	display_5_7_1e11._advance_scientific(1)
+	expected_actual.append((
+		"(5/7)/10^11 first bridge copy omits ellipsis",
+		"7.142857142857e-12",
+		display_5_7_1e11.get_copy_text(),
+	))
+	expected_actual.append((
+		"(5/7)/10^11 first bridge shift+copy keeps real value",
+		"0.000000000007142857142857",
+		display_5_7_1e11.get_copy_text(plain_decimal=True),
+	))
+	checks.append((
+		"(5/7)/10^11 first bridge copy has no ellipsis",
+		"…" not in display_5_7_1e11.get_copy_text(),
+	))
+
 	_, _, states_3_17539 = _walk("3/17539", steps=10, initial_digits=260)
 	checks.append((
 		"3/17539 first shifted state is dot-start with leading zeros",
@@ -257,6 +287,22 @@ def run_regressions() -> None:
 	checks.append((
 		"3/17539 third shifted state resumes normal shifted scientific",
 		len(states_3_17539) >= 3 and states_3_17539[2] == "…7104738012429e-17",
+	))
+	display_3_17539_back = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("3/17539"))
+	display_3_17539_back._advance_scientific(1)
+	display_3_17539_back._advance_scientific(1)
+	display_3_17539_back._advance_scientific(-1)
+	checks.append((
+		"3/17539 left from standard scientific bridge returns to dot-start",
+		display_3_17539_back.get_text() == "….0001710473801242",
+	))
+	display_3_17539_back._advance_scientific(-1)
+	checks.append((
+		"3/17539 second left from bridge returns to initial flat decimal",
+		display_3_17539_back.get_text() == "0.000171047380124",
 	))
 
 	_, _, states_3_1753 = _walk("3/1753", steps=10, initial_digits=260)

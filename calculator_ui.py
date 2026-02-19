@@ -121,18 +121,13 @@ class ResultDisplay:
         Cuando está desplazado (hay '…') reconstruye el bloque completo:
         dígitos ocultos a la izquierda + dígitos visibles + exponente.
         """
-        if not self._sci_mode or self._sci_shift == 0:
-            # Shift+Copiar sobre número con exponente negativo (ej. 3e-30 → forma plana)
-            if (
-                plain_decimal
-                and self._sci_mode
-                and self._sci_exponent < 0
-                and self._sci_source_kind == "scientific"
-                and not self._is_exact_integer_scientific_value()
-            ):
-                digits = self._sci_digits
-                leading_zeros = abs(self._sci_exponent + 1)  # ceros tras "0."
-                return f"{self._sci_sign}0.{'0' * leading_zeros}{digits}"
+        if not self._sci_mode:
+            return self._var.get()
+
+        if self._sci_shift == 0:
+            visible_copy = self._copy_text_from_unshifted_scientific_view(plain_decimal)
+            if visible_copy is not None:
+                return visible_copy
             return self._var.get()
 
         current_text = self._var.get()
@@ -195,6 +190,94 @@ class ResultDisplay:
             if idx >= 0:
                 right_edge = idx + len(visible)
         return f"{sign}{virtual_digits[:right_edge]}"
+
+    def _copy_text_from_unshifted_scientific_view(self, plain_decimal: bool) -> str | None:
+        bridge_copy = self._copy_text_from_initial_scientific_bridge(plain_decimal)
+        if bridge_copy is not None:
+            return bridge_copy
+
+        parsed = self._parse_visible_scientific_for_copy(self._var.get())
+        if parsed is None:
+            return None
+
+        sign, digits, exponent = parsed
+        if plain_decimal and not self._is_exact_integer_for_digits(digits, exponent):
+            return self._to_plain_decimal_text(sign, digits, exponent)
+
+        mantissa = self._format_mantissa_for_copy(digits)
+        return f"{sign}{mantissa}e{exponent:+d}"
+
+    def _copy_text_from_initial_scientific_bridge(self, plain_decimal: bool) -> str | None:
+        if not self._scientific_initial_bridge_active:
+            return None
+
+        text = self._var.get().strip()
+        match = re.fullmatch(r"(?P<sign>[+-]?)…\.(?P<frac>\d+)[eE](?P<exp>[+-]?\d+)", text)
+        if not match:
+            return None
+
+        visible_frac = match.group("frac")
+        # En el puente inicial ocultamos solo el primer dígito significativo.
+        # Al copiar, conservamos la magnitud real y recortamos a la precisión visible.
+        shown_digits = min(len(self._sci_digits), 1 + len(visible_frac))
+        digits = (self._sci_digits or "0")[:max(1, shown_digits)]
+        exponent = self._sci_exponent
+        sign = self._sci_sign
+
+        if plain_decimal and not self._is_exact_integer_for_digits(digits, exponent):
+            return self._to_plain_decimal_text(sign, digits, exponent)
+
+        mantissa = self._format_mantissa_for_copy(digits)
+        return f"{sign}{mantissa}e{exponent:+d}"
+
+    def _parse_visible_scientific_for_copy(self, text: str):
+        stripped = text.strip()
+        sci = self._SCI_RE.fullmatch(stripped)
+        if sci:
+            sign = sci.group("sign")
+            digits = sci.group("int") + (sci.group("frac") or "")
+            exponent = int(sci.group("exp"))
+            return sign, digits, exponent
+
+        # Estado puente inicial: "….<fracción>e±N" (sin dígito entero visible).
+        bridge = re.fullmatch(r"(?P<sign>[+-]?)…\.(?P<frac>\d+)[eE](?P<exp>[+-]?\d+)", stripped)
+        if not bridge:
+            return None
+
+        sign = bridge.group("sign")
+        frac = bridge.group("frac")
+        exponent = int(bridge.group("exp"))
+
+        non_zero = frac.lstrip("0")
+        if not non_zero:
+            return sign, "0", 0
+
+        removed_leading = len(frac) - len(non_zero)
+        normalized_exponent = exponent - removed_leading - 1
+        return sign, non_zero, normalized_exponent
+
+    @staticmethod
+    def _is_exact_integer_for_digits(digits: str, exponent: int) -> bool:
+        if not digits:
+            return False
+        return exponent >= (len(digits) - 1)
+
+    @staticmethod
+    def _format_mantissa_for_copy(digits: str) -> str:
+        if not digits:
+            return "0"
+        if len(digits) == 1:
+            return digits
+        return f"{digits[0]}.{digits[1:]}"
+
+    @staticmethod
+    def _to_plain_decimal_text(sign: str, digits: str, exponent: int) -> str:
+        decimal_pos = exponent + 1
+        if decimal_pos <= 0:
+            return f"{sign}0.{'0' * abs(decimal_pos)}{digits}"
+        if decimal_pos >= len(digits):
+            return f"{sign}{digits}{'0' * (decimal_pos - len(digits))}"
+        return f"{sign}{digits[:decimal_pos]}.{digits[decimal_pos:]}"
 
     def _scroll_to_start(self):
         self._entry.icursor(0)
@@ -321,10 +404,6 @@ class ResultDisplay:
         self._maybe_request_more(direction)
 
     def _advance_scientific(self, direction: int):
-        if direction < 0:
-            self._dot_start_transition_active = False
-            self._scientific_initial_bridge_active = False
-
         if (
             direction > 0
             and self._sci_shift == 0
@@ -401,9 +480,18 @@ class ResultDisplay:
                         break
                 candidate += 1
         elif direction < 0:
-            self._sci_shift = max(0, self._sci_shift - 1)
-            self._dot_start_transition_active = False
-            self._force_scientific_current_shift = False
+            if self._dot_start_transition_active:
+                # Retroceso desde el puente científico temporal (x.xxxe-y)
+                # hacia la vista con punto inicial (….xxxx) sin perder el paso.
+                self._dot_start_transition_active = False
+                self._force_scientific_current_shift = False
+            elif self._scientific_initial_bridge_active:
+                self._scientific_initial_bridge_active = False
+                self._force_scientific_current_shift = False
+            else:
+                self._sci_shift = max(0, self._sci_shift - 1)
+                self._dot_start_transition_active = False
+                self._force_scientific_current_shift = False
 
         self._render_scientific()
         self._maybe_request_more_scientific(direction)
