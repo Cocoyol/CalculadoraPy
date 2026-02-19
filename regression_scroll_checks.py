@@ -1,5 +1,7 @@
 from arbitrary_precision_engine import ArbitraryPrecisionCalculatorEngine
 from calculator_ui import ResultDisplay
+import re
+import sys
 
 
 class _FakeVar:
@@ -85,6 +87,36 @@ def _walk(expr: str, *, steps: int, initial_digits: int):
 	return value, display.get_text(), states
 
 
+def inspect_scroll_states(
+	expr: str,
+	*,
+	steps: int = 8,
+	initial_digits: int = 260,
+	show: int = 3,
+) -> None:
+	"""Imprime estado inicial y primeros estados cambiantes al desplazar."""
+	value, end_text, states = _walk(expr, steps=steps, initial_digits=initial_digits)
+
+	print("Scroll inspection")
+	print(f"expr:           {expr}")
+	print(f"initial value:  {value}")
+	print(f"steps walked:   {steps}")
+	print(f"initial digits: {initial_digits}")
+	print(f"total states:   {len(states)}")
+
+	if not states:
+		print("first states:   (no changes)")
+		print(f"final text:     {end_text}")
+		return
+
+	limit = max(1, show)
+	print("first states:")
+	for i, text in enumerate(states[:limit], start=1):
+		print(f"  {i}. {text}")
+
+	print(f"final text:     {end_text}")
+
+
 def run_regressions() -> None:
 	checks: list[tuple[str, bool]] = []
 	expected_actual: list[tuple[str, str, str]] = []
@@ -99,11 +131,11 @@ def run_regressions() -> None:
 		any(text == "….7483752022212102" for text in states_main),
 	))
 	checks.append((
-		"dot-start hands off to e-13",
+		"dot-start hands off to standard scientific bridge",
 		any(
 			states_main[i] == "….7483752022212102"
 			and i + 1 < len(states_main)
-			and states_main[i + 1] == "…7483752022212e-13"
+			and re.fullmatch(r"[+-]?\d(?:\.\d+)?e-1", states_main[i + 1]) is not None
 			for i in range(len(states_main))
 		),
 	))
@@ -190,6 +222,73 @@ def run_regressions() -> None:
 		display_1e20.get_copy_text(plain_decimal=True) == "0." + "0" * 19 + "1",
 	))
 
+	_, _, states_5_7 = _walk("5/7", steps=8, initial_digits=240)
+	checks.append((
+		"5/7 first shifted state is dot-start",
+		len(states_5_7) >= 1 and states_5_7[0] == "….7142857142857142",
+	))
+	checks.append((
+		"5/7 second shifted state uses standard scientific bridge",
+		len(states_5_7) >= 2 and states_5_7[1] == "7.142857142857e-1",
+	))
+	checks.append((
+		"5/7 third shifted state resumes normal shifted scientific",
+		len(states_5_7) >= 3 and states_5_7[2] == "…1428571428571e-14",
+	))
+
+	_, _, states_3_17539 = _walk("3/17539", steps=10, initial_digits=260)
+	checks.append((
+		"3/17539 first shifted state is dot-start with leading zeros",
+		len(states_3_17539) >= 1 and states_3_17539[0] == "….0001710473801242",
+	))
+	display_3_17539 = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("3/17539"))
+	display_3_17539._advance_scientific(1)
+	checks.append((
+		"3/17539 first shifted copy omits ellipsis",
+		display_3_17539.get_copy_text() == "0.0001710473801242",
+	))
+	checks.append((
+		"3/17539 second shifted state uses standard scientific bridge",
+		len(states_3_17539) >= 2 and states_3_17539[1] == "1.710473801242e-4",
+	))
+	checks.append((
+		"3/17539 third shifted state resumes normal shifted scientific",
+		len(states_3_17539) >= 3 and states_3_17539[2] == "…7104738012429e-17",
+	))
+
+	_, _, states_3_1753 = _walk("3/1753", steps=10, initial_digits=260)
+	checks.append((
+		"3/1753 first shifted state is dot-start with leading zeros",
+		len(states_3_1753) >= 1 and states_3_1753[0] == "….0017113519680547",
+	))
+	checks.append((
+		"3/1753 second shifted state uses standard scientific bridge",
+		len(states_3_1753) >= 2 and states_3_1753[1] == "1.711351968054e-3",
+	))
+
+	_, _, states_3_175391 = _walk("3/175391", steps=10, initial_digits=260)
+	checks.append((
+		"3/175391 first shifted state is dot-start with leading zeros",
+		len(states_3_175391) >= 1 and states_3_175391[0] == "….0000171046404889",
+	))
+	checks.append((
+		"3/175391 second shifted state uses standard scientific bridge",
+		len(states_3_175391) >= 2 and states_3_175391[1] == "1.710464048896e-5",
+	))
+
+	_, _, states_3_over_19_19 = _walk("3/19^19", steps=8, initial_digits=220)
+	checks.append((
+		"3/19^19 first shifted state advances one place only",
+		len(states_3_over_19_19) >= 1 and states_3_over_19_19[0] == "….516361804947e-24",
+	))
+	checks.append((
+		"3/19^19 second shifted state resumes normal shifted scientific",
+		len(states_3_over_19_19) >= 2 and states_3_over_19_19[1] == "…5163618049471e-37",
+	))
+
 	failed = [name for name, ok in checks if not ok]
 	for name, ok in checks:
 		print(f"{name}: {'OK' if ok else 'FAIL'}")
@@ -211,4 +310,30 @@ def run_regressions() -> None:
 
 
 if __name__ == "__main__":
-	run_regressions()
+	# Uso rápido:
+	#   python regression_scroll_checks.py
+	#   python regression_scroll_checks.py --inspect "3/17539"
+	#   python regression_scroll_checks.py --inspect "3/17539" --steps 12 --digits 300 --show 5
+	if "--inspect" in sys.argv:
+		try:
+			expr = sys.argv[sys.argv.index("--inspect") + 1]
+		except (ValueError, IndexError):
+			raise SystemExit("Missing expression after --inspect")
+
+		def _read_int(flag: str, default: int) -> int:
+			if flag not in sys.argv:
+				return default
+			idx = sys.argv.index(flag)
+			try:
+				return int(sys.argv[idx + 1])
+			except (ValueError, IndexError):
+				raise SystemExit(f"Invalid value for {flag}")
+
+		inspect_scroll_states(
+			expr,
+			steps=_read_int("--steps", 8),
+			initial_digits=_read_int("--digits", 260),
+			show=_read_int("--show", 3),
+		)
+	else:
+		run_regressions()

@@ -54,6 +54,8 @@ class ResultDisplay:
         self._sci_shift = 0
         self._sci_initial_text = "0"
         self._sci_source_kind = None
+        self._dot_start_transition_active = False
+        self._scientific_initial_bridge_active = False
         self._setup_bindings()
 
     @property
@@ -66,6 +68,8 @@ class ResultDisplay:
         if not preserve_view:
             self._precision_exhausted = False
             self._force_scientific_current_shift = False
+            self._dot_start_transition_active = False
+            self._scientific_initial_bridge_active = False
 
         scientific = self._parse_scientific(text)
         if scientific is not None:
@@ -166,6 +170,10 @@ class ResultDisplay:
         if '.' in content:
             right_edge = self._plain_decimal_right_edge(self._sci_shift)
             if right_edge is None:
+                # Estado especial de primer desplazamiento: "….xxxxx".
+                # En copiado se elimina la elipsis y se conserva el decimal visible.
+                if content.startswith('.'):
+                    return f"{sign}0{content}"
                 return current_text
             right_edge = min(right_edge, len(virtual_digits))
             full_digits = virtual_digits[:right_edge]
@@ -313,6 +321,26 @@ class ResultDisplay:
         self._maybe_request_more(direction)
 
     def _advance_scientific(self, direction: int):
+        if direction < 0:
+            self._dot_start_transition_active = False
+            self._scientific_initial_bridge_active = False
+
+        if (
+            direction > 0
+            and self._sci_shift == 0
+            and self._sci_source_kind == "scientific"
+            and not self._initial_text_fits_visible_window()
+            and len(self._sci_digits) > 1
+            and not self._scientific_initial_bridge_active
+        ):
+            bridge_text = self._build_initial_scientific_bridge_text()
+            if bridge_text != self._var.get():
+                self._scientific_initial_bridge_active = True
+                self._var.set(bridge_text)
+                self._entry.after(0, self._scroll_to_start)
+                self._maybe_request_more_scientific(direction)
+                return
+
         if (
             direction > 0
             and self._sci_shift == 0
@@ -321,15 +349,16 @@ class ResultDisplay:
             self._render_scientific()
             return
 
+        if direction > 0 and self._scientific_initial_bridge_active:
+            self._scientific_initial_bridge_active = False
+
         if direction > 0:
             if self._is_plain_decimal_dot_start_state():
-                scientific_current, _ = self._build_shifted_scientific_text(
-                    self._sci_shift,
-                    prefer_plain_tail=False,
-                )
-                if scientific_current != self._var.get():
-                    self._force_scientific_current_shift = True
-                    self._render_scientific()
+                transition_text = self._build_dot_start_transition_text()
+                if transition_text != self._var.get():
+                    self._dot_start_transition_active = True
+                    self._var.set(transition_text)
+                    self._entry.after(0, self._scroll_to_start)
                     self._maybe_request_more_scientific(direction)
                     return
 
@@ -367,11 +396,13 @@ class ResultDisplay:
                     candidate_text = self._preview_scientific_text(candidate)
                     if candidate_text != current_text:
                         self._sci_shift = candidate
+                        self._dot_start_transition_active = False
                         self._force_scientific_current_shift = False
                         break
                 candidate += 1
         elif direction < 0:
             self._sci_shift = max(0, self._sci_shift - 1)
+            self._dot_start_transition_active = False
             self._force_scientific_current_shift = False
 
         self._render_scientific()
@@ -436,8 +467,17 @@ class ResultDisplay:
 
         self._sci_shift = shift
         if shift == 0:
-            text = self._initial_visible_text()
+            if self._scientific_initial_bridge_active:
+                text = self._build_initial_scientific_bridge_text()
+            else:
+                text = self._initial_visible_text()
         else:
+            if self._dot_start_transition_active:
+                text = self._build_dot_start_transition_text()
+                self._var.set(text)
+                self._entry.after(0, self._scroll_to_start)
+                return
+
             plain_decimal = self._build_plain_decimal_window_text(shift)
             if plain_decimal is not None and not self._force_scientific_current_shift:
                 text = plain_decimal[0]
@@ -474,11 +514,75 @@ class ResultDisplay:
         return text[:capacity]
 
     def _is_plain_decimal_dot_start_state(self) -> bool:
-        if not self._should_render_plain_decimal_window(self._sci_shift):
+        if self._sci_shift <= 0:
             return False
 
-        dot_pos = self._plain_decimal_dot_position(self._sci_shift)
-        return dot_pos == 0
+        sign = self._sci_sign
+        return self._var.get().startswith(f"{sign}….")
+
+    def _build_dot_start_transition_text(self) -> str:
+        sign = self._sci_sign
+        digits = self._virtual_digits_for_shifting()
+        if not digits:
+            digits = self._sci_digits or "0"
+
+        effective_shift = self._effective_shift(self._sci_shift)
+        effective_shift = min(max(0, effective_shift), max(0, len(digits) - 1))
+        mantissa_digits = digits[effective_shift:] or "0"
+        exponent = self._sci_exponent - effective_shift
+        exp_text = f"e{exponent:+d}"
+        budget = max(1, self._visible_capacity_chars() - len(sign) - len(exp_text))
+
+        if budget == 1:
+            mantissa = mantissa_digits[0]
+        elif budget == 2:
+            second = mantissa_digits[1:2]
+            mantissa = f"{mantissa_digits[0]}{second}" if second else mantissa_digits[0]
+        else:
+            frac_len = budget - 2
+            frac = mantissa_digits[1 : 1 + frac_len]
+            mantissa = f"{mantissa_digits[0]}.{frac}" if frac else mantissa_digits[0]
+
+        return f"{sign}{mantissa}{exp_text}"
+
+    def _build_initial_scientific_bridge_text(self) -> str:
+        sign = self._sci_sign
+        digits = self._sci_digits or "0"
+        exp_text = f"e{self._sci_exponent:+d}"
+        budget = max(1, self._visible_capacity_chars() - len(sign) - len(exp_text))
+        frac_len = max(1, budget - 1)
+        frac = digits[1 : 1 + frac_len]
+        if not frac:
+            frac = "0"
+        return f"{sign}….{frac}{exp_text}"
+
+    def _build_first_shift_dot_start_text(self, shift: int) -> tuple[str, bool] | None:
+        if shift != 1:
+            return None
+        if self._sci_source_kind != "decimal":
+            return None
+        if self._is_exact_integer_scientific_value():
+            return None
+        if self._sci_exponent >= 0:
+            return None
+
+        digits = self._virtual_digits_for_shifting()
+        if not digits:
+            return None
+
+        sign = self._sci_sign
+        body_width = max(1, self._visible_capacity_chars() - len(sign))
+        frac_width = max(1, body_width - 1)
+        decimal_index = self._sci_exponent + 1
+        leading_zeros = max(0, -decimal_index)
+        frac_full = ("0" * leading_zeros) + digits
+        chunk = frac_full[:frac_width]
+        if not chunk:
+            return None
+
+        core = f".{chunk}"
+        text = f"{sign}…{core}"
+        return text, len(core) >= body_width
 
     def _format_initial_scientific(self) -> str:
         exponent = self._sci_exponent
@@ -632,6 +736,10 @@ class ResultDisplay:
         return self._sci_exponent >= (len(digits) - 1)
 
     def _build_plain_decimal_window_text(self, shift: int) -> tuple[str, bool] | None:
+        first_shift = self._build_first_shift_dot_start_text(shift)
+        if first_shift is not None:
+            return first_shift
+
         if not self._should_render_plain_decimal_window(shift):
             return None
 
