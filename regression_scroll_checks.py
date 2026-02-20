@@ -131,11 +131,11 @@ def run_regressions() -> None:
 		any(text == "….7483752022212102" for text in states_main),
 	))
 	checks.append((
-		"dot-start hands off to standard scientific bridge",
+		"dot-start skips bridge for non-fractional values (exponent >= 0)",
 		any(
 			states_main[i] == "….7483752022212102"
 			and i + 1 < len(states_main)
-			and re.fullmatch(r"[+-]?\d(?:\.\d+)?e-1", states_main[i + 1]) is not None
+			and re.fullmatch(r"…\d+e[+-]\d+", states_main[i + 1]) is not None
 			for i in range(len(states_main))
 		),
 	))
@@ -333,6 +333,100 @@ def run_regressions() -> None:
 	checks.append((
 		"3/19^19 second shifted state resumes normal shifted scientific",
 		len(states_3_over_19_19) >= 2 and states_3_over_19_19[1] == "…5163618049471e-37",
+	))
+
+	# Números >= 1 no deben generar puente científico al llegar a dot-start
+	_, _, states_27_23 = _walk("27/23", steps=10, initial_digits=260)
+	checks.append((
+		"27/23 never produces a bridge like X.XXXe-1",
+		not any(re.fullmatch(r"[+-]?\d(?:\.\d+)?e-1", text) for text in states_27_23),
+	))
+
+	_, _, states_20_20 = _walk("20^20-sqrt(3)", steps=120, initial_digits=420)
+	checks.append((
+		"20^20-sqrt(3) never produces a bridge like X.XXXe-1",
+		not any(re.fullmatch(r"[+-]?\d(?:\.\d+)?e-1", text) for text in states_20_20),
+	))
+
+	# Números negativos: el cálculo inicial muestra signo + 17 dígitos (18 chars)
+	display_neg_dec = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("0-23/27"))
+	neg_dec_initial = display_neg_dec.get_text()
+	expected_actual.append((
+		"-23/27 initial display",
+		"-0.851851851851851",
+		neg_dec_initial,
+	))
+	checks.append((
+		"-23/27 initial has sign + 17 digits (18 chars)",
+		len(neg_dec_initial) == 18 and neg_dec_initial.startswith("-"),
+	))
+	# Al desplazar a la derecha se restaura a 17 chars de cuerpo
+	display_neg_dec._advance_scientific(1)
+	neg_dec_shifted = display_neg_dec.get_text()
+	checks.append((
+		"-23/27 first shift reverts to 17-char body",
+		len(neg_dec_shifted.replace("…", "")) == 17,
+	))
+	# Regreso al inicio restaura la vista expandida
+	display_neg_dec._advance_scientific(-1)
+	checks.append((
+		"-23/27 scroll back restores expanded initial",
+		display_neg_dec.get_text() == neg_dec_initial,
+	))
+
+	# Puente científico estándar para negativos: signo + 17 chars
+	display_neg_bridge = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("0-23/27"))
+	display_neg_bridge._advance_scientific(1)  # dot-start
+	display_neg_bridge._advance_scientific(1)  # bridge
+	neg_bridge_text = display_neg_bridge.get_text()
+	expected_actual.append((
+		"-23/27 bridge display",
+		"-8.518518518518e-1",
+		neg_bridge_text,
+	))
+	checks.append((
+		"-23/27 bridge has sign + 17 chars (18 total)",
+		len(neg_bridge_text) == 18 and neg_bridge_text.startswith("-"),
+	))
+	# Positivo sigue con 17 chars en puente
+	_, _, states_pos_5_7 = _walk("5/7", steps=3, initial_digits=260)
+	checks.append((
+		"5/7 bridge stays 17 chars (positive unchanged)",
+		len(states_pos_5_7) >= 2 and len(states_pos_5_7[1]) == 17,
+	))
+
+	display_neg_sci = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("0-25^25"))
+	neg_sci_initial = display_neg_sci.get_text()
+	expected_actual.append((
+		"-25^25 initial display",
+		"-8.88178419700e+34",
+		neg_sci_initial,
+	))
+	checks.append((
+		"-25^25 initial has sign + 17 chars (18 total)",
+		len(neg_sci_initial) == 18 and neg_sci_initial.startswith("-"),
+	))
+	display_neg_sci._advance_scientific(1)
+	display_neg_sci._advance_scientific(-1)
+	checks.append((
+		"-25^25 scroll back restores expanded initial",
+		display_neg_sci.get_text() == neg_sci_initial,
+	))
+
+	# Números positivos no deben cambiar (siguen con 17 chars)
+	display_pos = _make_display("0.3333333333333333")
+	checks.append((
+		"positive 1/3 initial stays 17 chars",
+		len(display_pos.get_text()) == 17,
 	))
 
 	failed = [name for name, ok in checks if not ok]

@@ -432,7 +432,7 @@ class ResultDisplay:
             self._scientific_initial_bridge_active = False
 
         if direction > 0:
-            if self._is_plain_decimal_dot_start_state():
+            if self._is_plain_decimal_dot_start_state() and self._sci_exponent < 0:
                 transition_text = self._build_dot_start_transition_text()
                 if transition_text != self._var.get():
                     self._dot_start_transition_active = True
@@ -595,7 +595,7 @@ class ResultDisplay:
         if self._sci_source_kind != "decimal":
             return text
 
-        capacity = self._visible_capacity_chars()
+        capacity = self._initial_visible_capacity_chars()
         if len(text) <= capacity:
             return text
 
@@ -619,7 +619,7 @@ class ResultDisplay:
         mantissa_digits = digits[effective_shift:] or "0"
         exponent = self._sci_exponent - effective_shift
         exp_text = f"e{exponent:+d}"
-        budget = max(1, self._visible_capacity_chars() - len(sign) - len(exp_text))
+        budget = max(1, self._initial_visible_capacity_chars() - len(sign) - len(exp_text))
 
         if budget == 1:
             mantissa = mantissa_digits[0]
@@ -675,7 +675,7 @@ class ResultDisplay:
     def _format_initial_scientific(self) -> str:
         exponent = self._sci_exponent
         exp_text = f"e{exponent:+d}"
-        budget = max(1, self._visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
+        budget = max(1, self._initial_visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
 
         if budget == 1:
             mantissa = self._sci_digits[0]
@@ -690,6 +690,12 @@ class ResultDisplay:
         return f"{self._sci_sign}{mantissa}{exp_text}"
 
     def _visible_capacity_chars(self) -> int:
+        return self.VISIBLE_CHARS
+
+    def _initial_visible_capacity_chars(self) -> int:
+        """Capacity for the initial (unshifted) display: +1 for negative sign."""
+        if self._sci_sign == "-":
+            return self.VISIBLE_CHARS + 1
         return self.VISIBLE_CHARS
 
     def _effective_shift(self, shift: int) -> int:
@@ -719,7 +725,7 @@ class ResultDisplay:
         if not text:
             return True
 
-        return len(text) <= self._visible_capacity_chars()
+        return len(text) <= self._initial_visible_capacity_chars()
 
     @staticmethod
     def _count_trailing_zeros(text: str) -> int:
