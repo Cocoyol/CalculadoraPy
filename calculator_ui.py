@@ -25,7 +25,7 @@ class ResultDisplay:
     DRAG_THRESHOLD = 8      # píxeles por carácter al arrastrar
     PREFETCH_MARGIN = 30    # solicitar más precisión antes del final
     SCI_FRACTION_WINDOW = 30    # dígitos de precisión que se muestran en modo científico antes de solicitar más
-    VISIBLE_CHARS = 17       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
+    VISIBLE_CHARS = 22       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
     SHOW_SHIFTED_SEPARATOR = False  # muestra separador visual en modo desplazado
     PLAIN_TAIL_LAST_EXPONENT = 4    # último exponente para mostrar cola fija sin exponente en modo desplazado
 
@@ -1077,7 +1077,7 @@ class CalculatorApp:
         self.root = root
         self.root.title("Calculadora Cient\u00EDfica")
         self.root.configure(bg=self.C["bg"])
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
 
         self.engine = engine if engine is not None else CalculatorEngine()
         self._inv_mode = False
@@ -1091,8 +1091,18 @@ class CalculatorApp:
         self._create_keypad()
         self._bind_keyboard()
 
+        # Tamaño mínimo derivado del layout real: se adapta a VISIBLE_CHARS y tamaños de fuente
+        self.root.update_idletasks()
+        self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+
         # Foco inicial en el campo de expresión
         self.expr_entry.focus_set()
+
+        # Escalado de fuentes al redimensionar
+        self._base_size: tuple[int, int] | None = None
+        self._resize_pending: str | None = None
+        self.root.after(250, self._record_base_size)
+        self.root.bind("<Configure>", self._on_root_configure)
 
     # ── Fuentes ──────────────────────────────────────────────────
 
@@ -1102,6 +1112,7 @@ class CalculatorApp:
         self._f_btn    = tkfont.Font(family="Segoe UI", size=15)
         self._f_func   = tkfont.Font(family="Segoe UI", size=12)
         self._f_small  = tkfont.Font(family="Segoe UI", size=11)
+        self._base_font_sizes = {"expr": 16, "result": 22, "btn": 15, "func": 12, "small": 11}
 
     # ── Pantalla ─────────────────────────────────────────────────
 
@@ -1193,15 +1204,18 @@ class CalculatorApp:
         frame = tk.Frame(self.root, bg=self.C["bg"])
         frame.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
-        # Determinar el ancho máximo de las filas
-        max_cols = max(len(row) for row in self.KEYPAD)
+        # 12 columnas lógicas: LCM(4, 6) → filas de 6 botones [2×6] y de 4 botones [3×4]
+        max_cols = 12
         for c in range(max_cols):
             frame.columnconfigure(c, weight=1, uniform="key")
 
         for r, row_def in enumerate(self.KEYPAD):
             cols_in_row = len(row_def)
-            # Repartir columnas con colspan para filas cortas
-            spans = self._compute_spans(cols_in_row, max_cols)
+            # Última fila: 0 ocupa 2 espacios de botón, '.' y '=' ocupan 1 cada uno
+            if r == len(self.KEYPAD) - 1:
+                spans = [6, 3, 3]
+            else:
+                spans = self._compute_spans(cols_in_row, max_cols)
             col_pos = 0
             for idx, (text, action, kind) in enumerate(row_def):
                 bg = self.C[kind]
@@ -1235,6 +1249,37 @@ class CalculatorApp:
         self.expr_entry.bind("<KP_Enter>", lambda _e: self._calculate())
         self.root.bind("<Escape>", lambda _e: self._on_key("clear"))
         # Permitir escritura libre en el campo de expresión
+
+    # ── Redimensionamiento ────────────────────────────────────────
+
+    def _record_base_size(self):
+        """Captura el tamaño inicial de la ventana para el escalado proporcional."""
+        self.root.update_idletasks()
+        self._base_size = (self.root.winfo_width(), self.root.winfo_height())
+
+    def _on_root_configure(self, event: tk.Event):
+        if event.widget is not self.root:
+            return
+        if self._base_size is None:
+            return
+        if self._resize_pending is not None:
+            self.root.after_cancel(self._resize_pending)
+        self._resize_pending = self.root.after(60, self._apply_font_scale_to_current)
+
+    def _apply_font_scale_to_current(self):
+        self._resize_pending = None
+        if self._base_size is None:
+            return
+        bw, bh = self._base_size
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        if bw <= 0 or bh <= 0 or w <= 0 or h <= 0:
+            return
+        scale = min(w / bw, h / bh)
+        scale = max(0.5, min(scale, 4.0))
+        for name, base in self._base_font_sizes.items():
+            new_size = max(8, round(base * scale))
+            getattr(self, f"_f_{name}").config(size=new_size)
 
     # ── Acciones ─────────────────────────────────────────────────
 
