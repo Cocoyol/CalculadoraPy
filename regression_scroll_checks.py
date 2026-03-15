@@ -192,10 +192,22 @@ def run_regressions() -> None:
 	value_3e30 = engine_3e30.evaluate("3*10^-30")
 	_, end_3e30, states_3e30 = _walk("3*10^-30", steps=20, initial_digits=18)
 	display_3e30 = _make_display(value_3e30)
+	_, end_9e24, states_9e24 = _walk("9^7/10^30", steps=20, initial_digits=40)
+	_, end_123e19, states_123e19 = _walk("123456789012/10^30", steps=20, initial_digits=80)
 	expected_actual.append((
 		"3*10^-30",
 		"3e-30",
 		end_3e30,
+	))
+	expected_actual.append((
+		"9^7/10^30",
+		"4.782969e-24",
+		end_9e24,
+	))
+	expected_actual.append((
+		"123456789012/10^30",
+		"1.23456789012e-19",
+		end_123e19,
 	))
 	checks.append((
 		"3e-30 displays without trailing zeros",
@@ -208,6 +220,14 @@ def run_regressions() -> None:
 	checks.append((
 		"3e-30 copy gives clean notation",
 		display_3e30.get_copy_text() == "3e-30",
+	))
+	checks.append((
+		"9^7/10^30 stays non-scrollable when scientific text underfills the window",
+		end_9e24 == "4.782969e-24" and len(states_9e24) == 0,
+	))
+	checks.append((
+		"123456789012/10^30 stays non-scrollable when scientific text exactly fits without hidden digits",
+		end_123e19 == "1.23456789012e-19" and len(states_123e19) == 0,
 	))
 	checks.append((
 		"3e-30 shift+copy gives flat decimal",
@@ -257,6 +277,11 @@ def run_regressions() -> None:
 		display_5_7_1e11.get_copy_text(),
 	))
 	expected_actual.append((
+		"(5/7)/10^11 first bridge ctrl+copy keeps standard scientific",
+		"7.142857142857e-12",
+		display_5_7_1e11.get_copy_text(standard_scientific=True),
+	))
+	expected_actual.append((
 		"(5/7)/10^11 first bridge shift+copy keeps real value",
 		"0.000000000007142857142857",
 		display_5_7_1e11.get_copy_text(plain_decimal=True),
@@ -303,6 +328,51 @@ def run_regressions() -> None:
 	checks.append((
 		"3/17539 second left from bridge returns to initial flat decimal",
 		display_3_17539_back.get_text() == "0.000171047380124",
+	))
+
+	display_ctrl_pos = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("3.57^125"))
+	for _ in range(5):
+		display_ctrl_pos._advance_scientific(1)
+	expected_actual.append((
+		"3.57^125 ctrl+copy from shifted view",
+		"1.2120680795971003e+69",
+		display_ctrl_pos.get_copy_text(standard_scientific=True),
+	))
+
+	display_ctrl_neg = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("3.57^-79"))
+	for _ in range(5):
+		display_ctrl_neg._advance_scientific(1)
+	expected_actual.append((
+		"3.57^-79 shift+copy from shifted view",
+		"0.000000000000000000000000000000000000000000021837902725202238",
+		display_ctrl_neg.get_copy_text(plain_decimal=True),
+	))
+	expected_actual.append((
+		"3.57^-79 ctrl+copy from shifted view",
+		"2.1837902725202238e-44",
+		display_ctrl_neg.get_copy_text(standard_scientific=True),
+	))
+
+	display_ctrl_fact = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("121!"))
+	for _ in range(5):
+		display_ctrl_fact._advance_scientific(1)
+	expected_actual.append((
+		"121! ctrl+copy from shifted view",
+		"8.094298525273443e+200",
+		display_ctrl_fact.get_copy_text(standard_scientific=True),
+	))
+	checks.append((
+		"ctrl+copy takes precedence over shift+copy",
+		display_ctrl_neg.get_copy_text(plain_decimal=True, standard_scientific=True) == "2.1837902725202238e-44",
 	))
 
 	_, _, states_3_1753 = _walk("3/1753", steps=10, initial_digits=260)

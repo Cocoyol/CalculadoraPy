@@ -111,24 +111,35 @@ class ResultDisplay:
     def get_text(self) -> str:
         return self._var.get()
 
-    def get_copy_text(self, plain_decimal: bool = False) -> str:
+    def get_copy_text(
+        self,
+        plain_decimal: bool = False,
+        standard_scientific: bool = False,
+    ) -> str:
         """Devuelve el texto a copiar: todos los dígitos desde el primero
         hasta el último visible a la derecha, conservando el exponente.
 
         Si plain_decimal=True y el número tiene parte fraccionaria, omite
         el exponente e inserta el punto decimal en su posición absoluta.
+        Si standard_scientific=True, normaliza el texto copiable actual a
+        mantisa estándar x.yyyye±n usando los dígitos visibles.
         Cuando el resultado no está desplazado devuelve el texto visible.
         Cuando está desplazado (hay '…') reconstruye el bloque completo:
         dígitos ocultos a la izquierda + dígitos visibles + exponente.
         """
+        if standard_scientific:
+            plain_decimal = False
+
         if not self._sci_mode:
-            return self._var.get()
+            text = self._var.get()
+            return self._to_standard_scientific_copy(text) if standard_scientific else text
 
         if self._sci_shift == 0:
             visible_copy = self._copy_text_from_unshifted_scientific_view(plain_decimal)
             if visible_copy is not None:
-                return visible_copy
-            return self._var.get()
+                return self._to_standard_scientific_copy(visible_copy) if standard_scientific else visible_copy
+            text = self._var.get()
+            return self._to_standard_scientific_copy(text) if standard_scientific else text
 
         current_text = self._var.get()
         sign = self._sci_sign
@@ -156,10 +167,13 @@ class ResultDisplay:
                 decimal_pos = self._sci_exponent + 1  # cantidad de dígitos enteros
                 if decimal_pos < total_digits:
                     if decimal_pos <= 0:
-                        return f"{sign}0.{'0' * abs(decimal_pos)}{digits}"
-                    return f"{sign}{digits[:decimal_pos]}.{digits[decimal_pos:]}"
+                        text = f"{sign}0.{'0' * abs(decimal_pos)}{digits}"
+                        return self._to_standard_scientific_copy(text) if standard_scientific else text
+                    text = f"{sign}{digits[:decimal_pos]}.{digits[decimal_pos:]}"
+                    return self._to_standard_scientific_copy(text) if standard_scientific else text
 
-            return f"{sign}{virtual_digits[:total_digits]}{exp_text}"
+            text = f"{sign}{virtual_digits[:total_digits]}{exp_text}"
+            return self._to_standard_scientific_copy(text) if standard_scientific else text
 
         # Caso B: ventana decimal plana (…1234.567, sin exponente)
         if '.' in content:
@@ -168,16 +182,20 @@ class ResultDisplay:
                 # Estado especial de primer desplazamiento: "….xxxxx".
                 # En copiado se elimina la elipsis y se conserva el decimal visible.
                 if content.startswith('.'):
-                    return f"{sign}0{content}"
-                return current_text
+                    text = f"{sign}0{content}"
+                    return self._to_standard_scientific_copy(text) if standard_scientific else text
+                return self._to_standard_scientific_copy(current_text) if standard_scientific else current_text
             right_edge = min(right_edge, len(virtual_digits))
             full_digits = virtual_digits[:right_edge]
             decimal_pos = self._sci_exponent + 1  # dígitos antes del punto decimal
             if decimal_pos <= 0:
-                return f"{sign}0.{'0' * abs(decimal_pos)}{full_digits}"
+                text = f"{sign}0.{'0' * abs(decimal_pos)}{full_digits}"
+                return self._to_standard_scientific_copy(text) if standard_scientific else text
             if decimal_pos >= len(full_digits):
-                return f"{sign}{full_digits}{'0' * (decimal_pos - len(full_digits))}"
-            return f"{sign}{full_digits[:decimal_pos]}.{full_digits[decimal_pos:]}"
+                text = f"{sign}{full_digits}{'0' * (decimal_pos - len(full_digits))}"
+                return self._to_standard_scientific_copy(text) if standard_scientific else text
+            text = f"{sign}{full_digits[:decimal_pos]}.{full_digits[decimal_pos:]}"
+            return self._to_standard_scientific_copy(text) if standard_scientific else text
 
         # Caso C: cola fija entera (…12338905, sin exponente ni punto)
         # content son los dígitos visibles; localizar su extremo derecho en
@@ -189,7 +207,8 @@ class ResultDisplay:
             idx = virtual_digits.rfind(visible)
             if idx >= 0:
                 right_edge = idx + len(visible)
-        return f"{sign}{virtual_digits[:right_edge]}"
+        text = f"{sign}{virtual_digits[:right_edge]}"
+        return self._to_standard_scientific_copy(text) if standard_scientific else text
 
     def _copy_text_from_unshifted_scientific_view(self, plain_decimal: bool) -> str | None:
         bridge_copy = self._copy_text_from_initial_scientific_bridge(plain_decimal)
@@ -278,6 +297,39 @@ class ResultDisplay:
         if decimal_pos >= len(digits):
             return f"{sign}{digits}{'0' * (decimal_pos - len(digits))}"
         return f"{sign}{digits[:decimal_pos]}.{digits[decimal_pos:]}"
+
+    def _to_standard_scientific_copy(self, text: str) -> str:
+        parsed = self._parse_copy_text_as_standard_scientific(text)
+        if parsed is None:
+            return text
+
+        sign, digits, exponent = parsed
+        mantissa = self._format_mantissa_for_copy(digits)
+        return f"{sign}{mantissa}e{exponent:+d}"
+
+    def _parse_copy_text_as_standard_scientific(self, text: str):
+        stripped = text.strip()
+        if not stripped:
+            return None
+
+        sci = self._SCI_RE.fullmatch(stripped)
+        if sci:
+            sign = sci.group("sign")
+            digits = sci.group("int") + (sci.group("frac") or "")
+            exponent = int(sci.group("exp"))
+            return sign, digits, exponent
+
+        compact = re.fullmatch(r"(?P<sign>[+-]?)(?P<digits>\d+)[eE](?P<exp>[+-]?\d+)", stripped)
+        if compact:
+            sign = compact.group("sign")
+            digits = compact.group("digits")
+            significant = digits.lstrip("0")
+            if not significant:
+                return sign, "0", 0
+            exponent = int(compact.group("exp")) + len(significant) - 1
+            return sign, significant, exponent
+
+        return self._parse_decimal_as_scientific(stripped)
 
     def _scroll_to_start(self):
         self._entry.icursor(0)
@@ -698,6 +750,13 @@ class ResultDisplay:
             return self.VISIBLE_CHARS + 1
         return self.VISIBLE_CHARS
 
+    def _initial_scientific_visible_digits(self) -> int:
+        exp_text = f"e{self._sci_exponent:+d}"
+        budget = max(1, self._initial_visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
+        if budget <= 2:
+            return budget
+        return budget - 1
+
     def _effective_shift(self, shift: int) -> int:
         if self._sci_source_kind == "decimal" and self._sci_exponent < 0:
             return max(0, shift - 1)
@@ -718,14 +777,22 @@ class ResultDisplay:
         return digits + ("0" * scale)
 
     def _initial_text_fits_visible_window(self) -> bool:
-        if self._sci_source_kind != "decimal":
-            return False
-
         text = self._sci_initial_text.strip()
         if not text:
             return True
 
-        return len(text) <= self._initial_visible_capacity_chars()
+        capacity = self._initial_visible_capacity_chars()
+        if self._sci_source_kind != "scientific":
+            return len(text) <= capacity
+
+        if len(text) < capacity:
+            return True
+        if len(text) > capacity:
+            return False
+
+        if len(self._sci_digits) <= self._initial_scientific_visible_digits():
+            return True
+        return False
 
     @staticmethod
     def _count_trailing_zeros(text: str) -> int:
@@ -1083,6 +1150,7 @@ class CalculatorApp:
         self._inv_mode = False
         self._last_engine_result: str | None = None
         self._shift_copy = False
+        self._ctrl_copy = False
 
         self._init_fonts()
         self._create_display()
@@ -1370,11 +1438,17 @@ class CalculatorApp:
 
     def _on_copy_press(self, event):
         self._shift_copy = bool(event.state & 0x1)  # bit 0 = Shift
+        self._ctrl_copy = bool(event.state & 0x4)   # bit 2 = Ctrl
 
     def _copy_result(self):
-        plain_decimal = self._shift_copy
+        standard_scientific = self._ctrl_copy
+        plain_decimal = self._shift_copy and not standard_scientific
         self._shift_copy = False
-        text = self.result_display.get_copy_text(plain_decimal=plain_decimal)
+        self._ctrl_copy = False
+        text = self.result_display.get_copy_text(
+            plain_decimal=plain_decimal,
+            standard_scientific=standard_scientific,
+        )
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.expr_entry.focus_set()
