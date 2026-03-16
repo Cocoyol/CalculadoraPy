@@ -5,12 +5,15 @@ Usa tkinter. El procesamiento se ejecuta en un hilo aparte
 para no bloquear la interfaz.
 """
 
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 import re
 from tkinter import font as tkfont
 
 from calculator_engine import CalculatorEngine
+
+
+_CACHE_UNSET = object()
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -25,7 +28,7 @@ class ResultDisplay:
     DRAG_THRESHOLD = 8      # píxeles por carácter al arrastrar
     PREFETCH_MARGIN = 30    # solicitar más precisión antes del final
     SCI_FRACTION_WINDOW = 30    # dígitos de precisión que se muestran en modo científico antes de solicitar más
-    VISIBLE_CHARS = 22       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
+    VISIBLE_CHARS = 17       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
     SHOW_SHIFTED_SEPARATOR = False  # muestra separador visual en modo desplazado
     PLAIN_TAIL_LAST_EXPONENT = 4    # último exponente para mostrar cola fija sin exponente en modo desplazado
 
@@ -56,6 +59,7 @@ class ResultDisplay:
         self._sci_source_kind = None
         self._dot_start_transition_active = False
         self._scientific_initial_bridge_active = False
+        self._reset_scientific_caches()
         self._setup_bindings()
 
     @property
@@ -64,7 +68,20 @@ class ResultDisplay:
 
     # ── Texto ────────────────────────────────────────────────────
 
+    def _reset_scientific_caches(self):
+        self._virtual_digits_cache = None
+        self._integer_trailing_zeros_cache = _CACHE_UNSET
+        self._can_render_plain_tail_cache = _CACHE_UNSET
+        self._shifted_scientific_layout_cache = {}
+        self._shifted_scientific_text_cache = {}
+        self._should_render_plain_tail_cache = {}
+        self._should_render_plain_decimal_window_cache = {}
+        self._plain_decimal_window_cache = {}
+        self._plain_decimal_right_edge_cache = {}
+        self._plain_decimal_dot_position_cache = {}
+
     def set_text(self, text: str, preserve_view: bool = False):
+        self._reset_scientific_caches()
         if not preserve_view:
             self._precision_exhausted = False
             self._force_scientific_current_shift = False
@@ -456,6 +473,7 @@ class ResultDisplay:
         self._maybe_request_more(direction)
 
     def _advance_scientific(self, direction: int):
+        precomputed_shift_text: tuple[int, str] | None = None
         if (
             direction > 0
             and self._sci_shift == 0
@@ -475,6 +493,7 @@ class ResultDisplay:
         if (
             direction > 0
             and self._sci_shift == 0
+            and self._sci_source_kind == "scientific"
             and self._initial_text_fits_visible_window()
         ):
             self._render_scientific()
@@ -524,11 +543,12 @@ class ResultDisplay:
                         ):
                             break
 
-                    candidate_text = self._preview_scientific_text(candidate)
+                    candidate_text = self._resolve_shifted_scientific_text(candidate)
                     if candidate_text != current_text:
                         self._sci_shift = candidate
                         self._dot_start_transition_active = False
                         self._force_scientific_current_shift = False
+                        precomputed_shift_text = (candidate, candidate_text)
                         break
                 candidate += 1
         elif direction < 0:
@@ -545,7 +565,7 @@ class ResultDisplay:
                 self._dot_start_transition_active = False
                 self._force_scientific_current_shift = False
 
-        self._render_scientific()
+        self._render_scientific(precomputed_shift_text=precomputed_shift_text)
         self._maybe_request_more_scientific(direction)
 
     def _maybe_request_more_scientific(self, direction: int):
@@ -568,10 +588,7 @@ class ResultDisplay:
         self._loading_more = True
         self._entry.after(0, self._request_more_callback)
 
-    def _preview_scientific_text(self, shift: int) -> str:
-        if shift <= 0:
-            return self._sci_initial_text
-
+    def _resolve_shifted_scientific_text(self, shift: int) -> str:
         plain_decimal = self._build_plain_decimal_window_text(shift)
         if plain_decimal is not None:
             return plain_decimal[0]
@@ -588,7 +605,7 @@ class ResultDisplay:
         )
         return text
 
-    def _render_scientific(self):
+    def _render_scientific(self, precomputed_shift_text: tuple[int, str] | None = None):
         digits = self._sci_digits
         if not digits:
             self._var.set("0")
@@ -618,22 +635,21 @@ class ResultDisplay:
                 self._entry.after(0, self._scroll_to_start)
                 return
 
-            plain_decimal = self._build_plain_decimal_window_text(shift)
-            if plain_decimal is not None and not self._force_scientific_current_shift:
-                text = plain_decimal[0]
-                self._var.set(text)
-                self._entry.after(0, self._scroll_to_start)
-                return
-
-            if self._can_render_plain_tail():
-                at_terminal_shift = self._should_render_plain_tail(shift)
+            if (
+                precomputed_shift_text is not None
+                and precomputed_shift_text[0] == shift
+                and not self._force_scientific_current_shift
+            ):
+                text = precomputed_shift_text[1]
             else:
-                _, next_is_full_width = self._build_shifted_scientific_text(shift + 1)
-                at_terminal_shift = not next_is_full_width
-            text, _ = self._build_shifted_scientific_text(
-                shift,
-                prefer_plain_tail=at_terminal_shift,
-            )
+                plain_decimal = self._build_plain_decimal_window_text(shift)
+                if plain_decimal is not None and not self._force_scientific_current_shift:
+                    text = plain_decimal[0]
+                    self._var.set(text)
+                    self._entry.after(0, self._scroll_to_start)
+                    return
+
+                text = self._resolve_shifted_scientific_text(shift)
             self._force_scientific_current_shift = False
 
         self._var.set(text)
@@ -763,18 +779,25 @@ class ResultDisplay:
         return shift
 
     def _virtual_digits_for_shifting(self) -> str:
+        if self._virtual_digits_cache is not None:
+            return self._virtual_digits_cache
+
         digits = self._sci_digits
         if not digits:
-            return ""
+            self._virtual_digits_cache = ""
+            return self._virtual_digits_cache
 
         scale = max(0, self._sci_exponent - (len(digits) - 1))
         if scale <= 0:
-            return digits
+            self._virtual_digits_cache = digits
+            return self._virtual_digits_cache
 
         if not self._can_render_plain_tail():
-            return digits
+            self._virtual_digits_cache = digits
+            return self._virtual_digits_cache
 
-        return digits + ("0" * scale)
+        self._virtual_digits_cache = digits + ("0" * scale)
+        return self._virtual_digits_cache
 
     def _initial_text_fits_visible_window(self) -> bool:
         text = self._sci_initial_text.strip()
@@ -804,90 +827,90 @@ class ResultDisplay:
         return count
 
     def _integer_trailing_zeros(self) -> int | None:
+        if self._integer_trailing_zeros_cache is not _CACHE_UNSET:
+            return self._integer_trailing_zeros_cache
+
         digits = self._sci_digits
         if not digits:
-            return 0
+            self._integer_trailing_zeros_cache = 0
+            return self._integer_trailing_zeros_cache
 
         trailing_in_digits = self._count_trailing_zeros(digits)
         scale = self._sci_exponent - (len(digits) - 1)
 
         if scale < 0 and trailing_in_digits < -scale:
-            return None
+            self._integer_trailing_zeros_cache = None
+            return self._integer_trailing_zeros_cache
 
-        return max(0, trailing_in_digits + scale)
+        self._integer_trailing_zeros_cache = max(0, trailing_in_digits + scale)
+        return self._integer_trailing_zeros_cache
 
     def _can_render_plain_tail(self) -> bool:
+        if self._can_render_plain_tail_cache is not _CACHE_UNSET:
+            return self._can_render_plain_tail_cache
+
         trailing_zeros = self._integer_trailing_zeros()
         if trailing_zeros is None:
-            return False
+            self._can_render_plain_tail_cache = False
+            return self._can_render_plain_tail_cache
 
         zero_threshold = self._visible_capacity_chars() // 2
-        return trailing_zeros <= zero_threshold
-
-    def _minimum_shifted_exponent(self) -> int | None:
-        trailing_zeros = self._integer_trailing_zeros()
-        if trailing_zeros is None:
-            return None
-        if self._can_render_plain_tail():
-            return None
-        return trailing_zeros
-
-    def _has_full_plain_tail_at_shift(self, shift: int) -> bool:
-        if shift <= 0:
-            return False
-
-        virtual_digits = self._virtual_digits_for_shifting()
-        if not virtual_digits:
-            return False
-
-        effective_shift = self._effective_shift(shift)
-        effective_shift = min(max(0, effective_shift), max(0, len(virtual_digits) - 1))
-
-        sign = self._sci_sign
-        core_budget = max(1, self._visible_capacity_chars() - len(sign))
-        core_full = virtual_digits[effective_shift:]
-        return len(core_full) >= core_budget
+        self._can_render_plain_tail_cache = trailing_zeros <= zero_threshold
+        return self._can_render_plain_tail_cache
 
     def _shifted_exponent(self, shift: int) -> int | None:
-        text, _ = self._build_shifted_scientific_text(shift, prefer_plain_tail=False)
-        marker = text.rfind("e")
-        if marker < 0:
+        layout = self._build_shifted_scientific_layout(shift)
+        if layout is None:
             return None
-        try:
-            return int(text[marker + 1 :])
-        except ValueError:
-            return None
+        return layout["exponent"]
 
     def _should_render_plain_tail(self, shift: int) -> bool:
+        if shift in self._should_render_plain_tail_cache:
+            return self._should_render_plain_tail_cache[shift]
+
         if shift <= 0:
+            self._should_render_plain_tail_cache[shift] = False
             return False
         if not self._can_render_plain_tail():
+            self._should_render_plain_tail_cache[shift] = False
             return False
 
         exponent = self._shifted_exponent(shift)
         if exponent is None:
+            self._should_render_plain_tail_cache[shift] = True
             return True
 
-        return exponent <= (self.PLAIN_TAIL_LAST_EXPONENT - 1)
+        result = exponent <= (self.PLAIN_TAIL_LAST_EXPONENT - 1)
+        self._should_render_plain_tail_cache[shift] = result
+        return result
 
     def _should_render_plain_decimal_window(self, shift: int) -> bool:
+        if shift in self._should_render_plain_decimal_window_cache:
+            return self._should_render_plain_decimal_window_cache[shift]
+
         if shift <= 0:
+            self._should_render_plain_decimal_window_cache[shift] = False
             return False
 
         if self._is_exact_integer_scientific_value():
+            self._should_render_plain_decimal_window_cache[shift] = False
             return False
 
         exponent = self._shifted_exponent(shift)
         if exponent is None:
+            self._should_render_plain_decimal_window_cache[shift] = False
             return False
 
         if exponent > (self.PLAIN_TAIL_LAST_EXPONENT - 1):
+            self._should_render_plain_decimal_window_cache[shift] = False
             return False
 
         effective_shift = self._effective_shift(shift)
         decimal_index = self._sci_exponent + 1
         dot_pos = decimal_index - effective_shift
-        return dot_pos >= 0
+        result = dot_pos >= 0
+        self._should_render_plain_decimal_window_cache[shift] = result
+        return result
 
     def _is_exact_integer_scientific_value(self) -> bool:
         digits = self._sci_digits
@@ -897,15 +920,21 @@ class ResultDisplay:
         return self._sci_exponent >= (len(digits) - 1)
 
     def _build_plain_decimal_window_text(self, shift: int) -> tuple[str, bool] | None:
+        if shift in self._plain_decimal_window_cache:
+            return self._plain_decimal_window_cache[shift]
+
         first_shift = self._build_first_shift_dot_start_text(shift)
         if first_shift is not None:
+            self._plain_decimal_window_cache[shift] = first_shift
             return first_shift
 
         if not self._should_render_plain_decimal_window(shift):
+            self._plain_decimal_window_cache[shift] = None
             return None
 
         digits = self._virtual_digits_for_shifting()
         if not digits:
+            self._plain_decimal_window_cache[shift] = None
             return None
 
         effective_shift = self._effective_shift(shift)
@@ -926,19 +955,27 @@ class ResultDisplay:
             digits_needed = max(1, body_width - 1)
             chunk = digits[effective_shift : effective_shift + digits_needed]
             if not chunk:
+                self._plain_decimal_window_cache[shift] = None
                 return None
             insert_at = min(max(0, dot_pos), len(chunk))
             core = f"{chunk[:insert_at]}.{chunk[insert_at:]}"
 
         text = f"{sign}…{core}"
-        return text, len(core) >= body_width
+        result = (text, len(core) >= body_width)
+        self._plain_decimal_window_cache[shift] = result
+        return result
 
     def _plain_decimal_right_edge(self, shift: int) -> int | None:
+        if shift in self._plain_decimal_right_edge_cache:
+            return self._plain_decimal_right_edge_cache[shift]
+
         if not self._should_render_plain_decimal_window(shift):
+            self._plain_decimal_right_edge_cache[shift] = None
             return None
 
         digits = self._virtual_digits_for_shifting()
         if not digits:
+            self._plain_decimal_right_edge_cache[shift] = None
             return None
 
         effective_shift = self._effective_shift(shift)
@@ -953,20 +990,86 @@ class ResultDisplay:
         else:
             digits_needed = max(1, body_width - 1)
 
-        return min(len(digits), effective_shift + digits_needed)
+        result = min(len(digits), effective_shift + digits_needed)
+        self._plain_decimal_right_edge_cache[shift] = result
+        return result
 
     def _plain_decimal_dot_position(self, shift: int) -> int | None:
+        if shift in self._plain_decimal_dot_position_cache:
+            return self._plain_decimal_dot_position_cache[shift]
+
         if not self._should_render_plain_decimal_window(shift):
+            self._plain_decimal_dot_position_cache[shift] = None
             return None
 
         effective_shift = self._effective_shift(shift)
         decimal_index = self._sci_exponent + 1
-        return decimal_index - effective_shift
+        result = decimal_index - effective_shift
+        self._plain_decimal_dot_position_cache[shift] = result
+        return result
 
     def _allow_underfull_progress(self, shift: int) -> bool:
         return shift > 0 and self._can_render_plain_tail()
 
+    def _build_shifted_scientific_layout(self, shift: int):
+        if shift in self._shifted_scientific_layout_cache:
+            return self._shifted_scientific_layout_cache[shift]
+
+        digits = self._sci_digits
+        if not digits:
+            self._shifted_scientific_layout_cache[shift] = None
+            return None
+
+        virtual_digits = self._virtual_digits_for_shifting()
+        effective_shift = self._effective_shift(shift)
+        effective_shift = min(max(0, effective_shift), max(0, len(virtual_digits) - 1))
+
+        sign = self._sci_sign
+        core_budget = max(1, self._visible_capacity_chars() - len(sign))
+        use_separator = (
+            self.SHOW_SHIFTED_SEPARATOR
+            and self._sci_source_kind == "decimal"
+        )
+
+        mantissa_digits = max(1, core_budget - (1 if use_separator else 0))
+        for _ in range(3):
+            exponent = self._sci_exponent - (effective_shift + mantissa_digits - 1)
+            exp_text = f"e{exponent:+d}"
+            new_budget = max(1, core_budget - len(exp_text) - (1 if use_separator else 0))
+            if new_budget == mantissa_digits:
+                break
+            mantissa_digits = new_budget
+
+        available_digits = max(1, len(virtual_digits) - effective_shift)
+        shown_digits = min(available_digits, mantissa_digits)
+        exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
+        exp_text = f"e{exponent:+d}"
+
+        max_shown = max(1, core_budget - len(exp_text) - (1 if use_separator else 0))
+        shown_digits = min(shown_digits, max_shown)
+        exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
+        exp_text = f"e{exponent:+d}"
+
+        mantissa = virtual_digits[effective_shift : effective_shift + shown_digits]
+        if use_separator and len(mantissa) > 1:
+            frac = mantissa[1:].rstrip("0")
+            mantissa = f"{mantissa[0]}.{frac}" if frac else mantissa[0]
+
+        core = f"{mantissa}{exp_text}"
+        result = {
+            "sign": sign,
+            "core": core,
+            "exponent": exponent,
+            "is_full_width": len(core) >= core_budget,
+        }
+        self._shifted_scientific_layout_cache[shift] = result
+        return result
+
     def _build_shifted_scientific_text(self, shift: int, prefer_plain_tail: bool = False) -> tuple[str, bool]:
+        cache_key = (shift, prefer_plain_tail)
+        if cache_key in self._shifted_scientific_text_cache:
+            return self._shifted_scientific_text_cache[cache_key]
+
         digits = self._sci_digits
         if not digits:
             return "0", False
@@ -993,46 +1096,17 @@ class ResultDisplay:
             else:
                 core = core_full
                 is_full_width = False
-            return f"{sign}{ellipsis}{core}", is_full_width
+            result = (f"{sign}{ellipsis}{core}", is_full_width)
+            self._shifted_scientific_text_cache[cache_key] = result
+            return result
 
-        use_separator = (
-            self.SHOW_SHIFTED_SEPARATOR
-            and self._sci_source_kind == "decimal"
-        )
+        layout = self._build_shifted_scientific_layout(shift)
+        if layout is None:
+            return "0", False
 
-        mantissa_budget = core_budget
-        if use_separator:
-            mantissa_budget = max(1, mantissa_budget - 1)
-
-        mantissa_digits = max(1, mantissa_budget)
-        for _ in range(4):
-            exponent = self._sci_exponent - (effective_shift + mantissa_digits - 1)
-            exp_text = f"e{exponent:+d}"
-            new_budget = max(1, core_budget - len(exp_text))
-            if use_separator:
-                new_budget = max(1, new_budget - 1)
-            if new_budget == mantissa_digits:
-                break
-            mantissa_digits = new_budget
-
-        available_digits = max(1, len(virtual_digits) - effective_shift)
-        shown_digits = min(available_digits, mantissa_digits)
-        exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
-        exp_text = f"e{exponent:+d}"
-
-        max_shown = max(1, core_budget - len(exp_text) - (1 if use_separator else 0))
-        shown_digits = min(shown_digits, max_shown)
-        exponent = self._sci_exponent - (effective_shift + shown_digits - 1)
-        exp_text = f"e{exponent:+d}"
-
-        mantissa = virtual_digits[effective_shift : effective_shift + shown_digits]
-        if use_separator and len(mantissa) > 1:
-            frac = mantissa[1:].rstrip("0")
-            mantissa = f"{mantissa[0]}.{frac}" if frac else mantissa[0]
-
-        core = f"{mantissa}{exp_text}"
-        is_full_width = len(core) >= core_budget
-        return f"{sign}{ellipsis}{core}", is_full_width
+        result = (f"{layout['sign']}{ellipsis}{layout['core']}", layout["is_full_width"])
+        self._shifted_scientific_text_cache[cache_key] = result
+        return result
 
     def _parse_scientific(self, text: str):
         match = self._SCI_RE.fullmatch(text.strip())
@@ -1145,12 +1219,17 @@ class CalculatorApp:
         self.root.title("Calculadora Cient\u00EDfica")
         self.root.configure(bg=self.C["bg"])
         self.root.resizable(True, True)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.engine = engine if engine is not None else CalculatorEngine()
         self._inv_mode = False
         self._last_engine_result: str | None = None
         self._shift_copy = False
         self._ctrl_copy = False
+        self._background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="calculator")
+        self._background_job_seq = 0
+        self._active_background_job_id = 0
+        self._closing = False
 
         self._init_fonts()
         self._create_display()
@@ -1349,12 +1428,54 @@ class CalculatorApp:
             new_size = max(8, round(base * scale))
             getattr(self, f"_f_{name}").config(size=new_size)
 
+    def _next_background_job_id(self) -> int:
+        self._background_job_seq += 1
+        self._active_background_job_id = self._background_job_seq
+        return self._active_background_job_id
+
+    def _is_active_background_job(self, job_id: int) -> bool:
+        return not self._closing and job_id == self._active_background_job_id
+
+    def _schedule_on_ui_thread(self, callback, job_id: int | None = None):
+        if self._closing:
+            return
+
+        def _run_if_valid():
+            if self._closing:
+                return
+            if job_id is not None and not self._is_active_background_job(job_id):
+                return
+            callback()
+
+        try:
+            self.root.after(0, _run_if_valid)
+        except tk.TclError:
+            pass
+
+    def _submit_background(self, fn) -> bool:
+        if self._closing:
+            return False
+        try:
+            self._background_executor.submit(fn)
+        except RuntimeError:
+            return False
+        return True
+
+    def _on_close(self):
+        if self._closing:
+            return
+        self._closing = True
+        self._background_executor.shutdown(wait=False, cancel_futures=True)
+        self.root.destroy()
+
     # ── Acciones ─────────────────────────────────────────────────
 
     def _on_key(self, action: str):
         if action == "clear":
+            self._next_background_job_id()
             self.expr_var.set("")
             self.result_display.set_text("0")
+            self.result_display.finish_loading_more()
             self.result_display.reset_precision_exhausted()
             self._last_engine_result = None
         elif action == "backspace":
@@ -1418,21 +1539,30 @@ class CalculatorApp:
         if not expr:
             return
 
+        job_id = self._next_background_job_id()
+        self.result_display.finish_loading_more()
+
         def _run():
             try:
                 result = self.engine.evaluate(expr)
-                self._last_engine_result = result
-                self.root.after(0, lambda: self.result_display.set_text(result))
+
+                def _apply_result():
+                    self._last_engine_result = result
+                    self.result_display.set_text(result)
+
+                self._schedule_on_ui_thread(_apply_result, job_id=job_id)
             except (ValueError, ZeroDivisionError, OverflowError,
                     ArithmeticError, TypeError) as exc:
                 error_name = type(exc).__name__
                 msg = str(exc) if str(exc) else error_name
-                self._last_engine_result = None
-                self.root.after(0, lambda: self.result_display.set_text(
-                    f"Error: {msg}"))
 
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
+                def _apply_error():
+                    self._last_engine_result = None
+                    self.result_display.set_text(f"Error: {msg}")
+
+                self._schedule_on_ui_thread(_apply_error, job_id=job_id)
+
+        self._submit_background(_run)
 
     # ── Copiar resultado ─────────────────────────────────────────
 
@@ -1458,22 +1588,31 @@ class CalculatorApp:
             self.result_display.finish_loading_more()
             return
 
+        job_id = self._next_background_job_id()
+
         def _run():
             try:
                 updated = self.engine.request_more_precision()
                 if self._last_engine_result is not None and updated == self._last_engine_result:
-                    self.root.after(0, self.result_display.mark_precision_exhausted)
+                    self._schedule_on_ui_thread(
+                        self.result_display.mark_precision_exhausted,
+                        job_id=job_id,
+                    )
                     return
 
-                self._last_engine_result = updated
-                self.root.after(0, lambda: self.result_display.set_text(
-                    updated,
-                    preserve_view=True,
-                ))
+                def _apply_updated_result():
+                    self._last_engine_result = updated
+                    self.result_display.set_text(
+                        updated,
+                        preserve_view=True,
+                    )
+
+                self._schedule_on_ui_thread(_apply_updated_result, job_id=job_id)
             except Exception:
                 pass
             finally:
-                self.root.after(0, self.result_display.finish_loading_more)
+                self._schedule_on_ui_thread(self.result_display.finish_loading_more)
 
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
+        submitted = self._submit_background(_run)
+        if not submitted:
+            self.result_display.finish_loading_more()

@@ -101,6 +101,8 @@ class ArbitraryPrecisionCalculatorEngine:
 
         self._working_digits = self._initial_digits
         self._last_expression: str | None = None
+        self._last_prepared_expression = None
+        self._last_compiled_expression = None
         self._last_value = None
 
     @property
@@ -112,9 +114,16 @@ class ArbitraryPrecisionCalculatorEngine:
         self._provider.angle_mode = mode
 
     def evaluate(self, expression: str) -> str:
+        prepared = self._prepare_expression(expression)
+        compiled = compile(prepared, "<calculator>", "eval")
+        working_digits = self._initial_digits
+        value = self._evaluate_compiled_expression(compiled, working_digits)
+
         self._last_expression = expression
-        self._working_digits = self._initial_digits
-        self._last_value = self._evaluate_with_digits(expression, self._working_digits)
+        self._last_prepared_expression = prepared
+        self._last_compiled_expression = compiled
+        self._working_digits = working_digits
+        self._last_value = value
         return self._format_result(self._last_value, self._working_digits)
 
     def can_expand_precision(self) -> bool:
@@ -124,26 +133,32 @@ class ArbitraryPrecisionCalculatorEngine:
         if not self._last_expression:
             raise ValueError("No hay cálculo previo")
 
+        compiled = self._last_compiled_expression
+        if compiled is None:
+            prepared = self._prepare_expression(self._last_expression)
+            compiled = compile(prepared, "<calculator>", "eval")
+            self._last_prepared_expression = prepared
+            self._last_compiled_expression = compiled
+
         self._working_digits += self._precision_step
-        self._last_value = self._evaluate_with_digits(
-            self._last_expression,
-            self._working_digits,
-        )
+        self._last_value = self._evaluate_compiled_expression(compiled, self._working_digits)
         return self._format_result(self._last_value, self._working_digits)
 
-    def _evaluate_with_digits(self, expression: str, digits: int):
+    def _prepare_expression(self, expression: str) -> str:
+        if not expression or not expression.strip():
+            raise ValueError("Expresión vacía")
+
+        self._evaluator._validate_raw_expression(expression)
+        processed = self._evaluator._preprocess(expression)
+        return self._promote_numeric_literals(processed)
+
+    def _evaluate_compiled_expression(self, compiled_expression, digits: int):
         internal_dps = max(40, digits * 2 + 10)
         with mp.workdps(internal_dps):
-            if not expression or not expression.strip():
-                raise ValueError("Expresión vacía")
-
-            self._evaluator._validate_raw_expression(expression)
-            processed = self._evaluator._preprocess(expression)
-            processed = self._promote_numeric_literals(processed)
             namespace = self._provider.build_namespace()
 
             try:
-                return eval(processed, {"__builtins__": {}}, namespace)
+                return eval(compiled_expression, {"__builtins__": {}}, namespace)
             except SyntaxError as exc:
                 raise ValueError("Error de sintaxis") from exc
             except NameError as exc:
