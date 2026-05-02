@@ -301,6 +301,22 @@ class CalculatorApp:
     def _is_active_background_job(self, job_id: int) -> bool:
         return not self._closing and job_id == self._active_background_job_id
 
+    def _engine_can_expand_precision(self) -> bool:
+        if not hasattr(self.engine, "request_more_precision"):
+            return False
+
+        checker = getattr(self.engine, "can_expand_precision", None)
+        if callable(checker):
+            return bool(checker())
+
+        return True
+
+    def _sync_result_precision_availability(self):
+        if self._engine_can_expand_precision():
+            self.result_display.reset_precision_exhausted()
+        else:
+            self.result_display.mark_precision_exhausted()
+
     def _schedule_on_ui_thread(self, callback, job_id: int | None = None):
         if self._closing:
             return
@@ -414,6 +430,7 @@ class CalculatorApp:
                 def _apply_result():
                     self._last_engine_result = result
                     self.result_display.set_text(result)
+                    self._sync_result_precision_availability()
 
                 self._schedule_on_ui_thread(_apply_result, job_id=job_id)
             except (ValueError, ZeroDivisionError, OverflowError,
@@ -449,7 +466,8 @@ class CalculatorApp:
         self.expr_entry.focus_set()
 
     def _request_more_precision(self):
-        if not hasattr(self.engine, "request_more_precision"):
+        if not self._engine_can_expand_precision():
+            self.result_display.mark_precision_exhausted()
             self.result_display.finish_loading_more()
             return
 

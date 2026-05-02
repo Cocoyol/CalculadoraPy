@@ -127,11 +127,13 @@ class ArbitraryPrecisionCalculatorEngine:
         return self._format_result(self._last_value, self._working_digits)
 
     def can_expand_precision(self) -> bool:
-        return self._last_expression is not None
+        return self._last_expression is not None and not self._is_complex_value(self._last_value)
 
     def request_more_precision(self) -> str:
         if not self._last_expression:
             raise ValueError("No hay cálculo previo")
+        if self._is_complex_value(self._last_value):
+            raise ValueError("Los resultados complejos no expanden precisión")
 
         compiled = self._last_compiled_expression
         if compiled is None:
@@ -143,6 +145,10 @@ class ArbitraryPrecisionCalculatorEngine:
         self._working_digits += self._precision_step
         self._last_value = self._evaluate_compiled_expression(compiled, self._working_digits)
         return self._format_result(self._last_value, self._working_digits)
+
+    @staticmethod
+    def _is_complex_value(value) -> bool:
+        return isinstance(value, mp.mpc)
 
     def _prepare_expression(self, expression: str) -> str:
         if not expression or not expression.strip():
