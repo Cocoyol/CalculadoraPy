@@ -242,6 +242,22 @@ def run_regressions() -> None:
 		display_1e20.get_copy_text(plain_decimal=True) == "0." + "0" * 19 + "1",
 	))
 
+	engine_complex = ArbitraryPrecisionCalculatorEngine(initial_digits=120, precision_step=120)
+	complex_value = engine_complex.evaluate("asin(3)")
+	checks.append((
+		"complex result uses initial precision only",
+		"j)" in complex_value and not engine_complex.can_expand_precision(),
+	))
+	try:
+		engine_complex.request_more_precision()
+		complex_request_blocked = False
+	except ValueError:
+		complex_request_blocked = True
+	checks.append((
+		"complex result blocks further precision requests",
+		complex_request_blocked,
+	))
+
 	_, _, states_5_7 = _walk("5/7", steps=8, initial_digits=240)
 	checks.append((
 		"5/7 first shifted state is dot-start",
