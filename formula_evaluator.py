@@ -95,12 +95,15 @@ class FormulaEvaluator:
     def __init__(self, provider: PythonMathProvider):
         self._provider = provider
 
-    def evaluate(self, expression: str):
+    def prepare(self, expression: str) -> str:
         if not expression or not expression.strip():
             raise ValueError("Expresión vacía")
 
         self._validate_raw_expression(expression)
-        processed = self._preprocess(expression)
+        return self._preprocess(expression)
+
+    def evaluate(self, expression: str):
+        processed = self.prepare(expression)
         namespace = self._provider.build_namespace()
 
         try:

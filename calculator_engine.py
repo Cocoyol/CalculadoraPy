@@ -1,10 +1,9 @@
 """
-Motor de cálculo para la calculadora científica.
+Motor de cálculo legacy para la calculadora científica.
 
 Este módulo provee la clase CalculatorEngine que procesa y evalúa
-expresiones matemáticas. Está diseñado como módulo independiente
-que puede ser reemplazado por implementaciones alternativas
-(e.g., reales constructivos de precisión arbitraria).
+expresiones matemáticas. Se conserva como fallback de compatibilidad
+y para pruebas cuando no se usa el motor de precisión arbitraria.
 
 Contrato de interfaz:
     - evaluate(expression: str) -> str
@@ -17,7 +16,7 @@ from formula_evaluator import FormulaEvaluator, PythonMathProvider
 
 
 class CalculatorEngine:
-    """Evalúa expresiones matemáticas con funciones científicas."""
+    """Motor legacy/fallback para expresiones matemáticas científicas."""
 
     def __init__(self):
         self._provider = PythonMathProvider()
@@ -32,6 +31,10 @@ class CalculatorEngine:
     @angle_mode.setter
     def angle_mode(self, mode: str):
         self._provider.angle_mode = mode
+
+    def clear_last_calculation(self):
+        """Compatibilidad con motores que conservan estado expandible."""
+        return None
 
     # ── Evaluación principal ─────────────────────────────────────
 

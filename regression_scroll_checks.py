@@ -56,7 +56,6 @@ def _make_display(value: str) -> _DummyResultDisplay:
 	display._last_drag_x = None
 	display._loading_more = False
 	display._precision_exhausted = False
-	display._force_scientific_current_shift = False
 	display._sci_mode = False
 	display._sci_sign = ""
 	display._sci_digits = ""
@@ -229,6 +228,31 @@ def run_regressions() -> None:
 		"123456789012/10^30 stays non-scrollable when scientific text exactly fits without hidden digits",
 		end_123e19 == "1.23456789012e-19" and len(states_123e19) == 0,
 	))
+	_, end_16_14, states_16_14 = _walk("16^14", steps=20, initial_digits=80)
+	checks.append((
+		"16^14 stays non-scrollable when the exact integer already fits the window",
+		end_16_14 == "72057594037927936" and len(states_16_14) == 0,
+	))
+	_, end_16_14_plus_1, states_16_14_plus_1 = _walk("16^14+1", steps=20, initial_digits=80)
+	checks.append((
+		"16^14+1 stays non-scrollable when the exact integer already fits the window",
+		end_16_14_plus_1 == "72057594037927937" and len(states_16_14_plus_1) == 0,
+	))
+	_, end_17_nines, states_17_nines = _walk("99999999999999999", steps=20, initial_digits=80)
+	checks.append((
+		"17-digit exact integer stays non-scrollable when it exactly fits the window",
+		end_17_nines == "99999999999999999" and len(states_17_nines) == 0,
+	))
+	original_visible_chars = ResultDisplay.VISIBLE_CHARS
+	try:
+		ResultDisplay.VISIBLE_CHARS = 19
+		_, end_10_18, states_10_18 = _walk("10^18", steps=20, initial_digits=80)
+	finally:
+		ResultDisplay.VISIBLE_CHARS = original_visible_chars
+	checks.append((
+		"10^18 expands to full integer when VISIBLE_CHARS allows it",
+		end_10_18 == "1000000000000000000" and len(states_10_18) == 0,
+	))
 	checks.append((
 		"3e-30 shift+copy gives flat decimal",
 		display_3e30.get_copy_text(plain_decimal=True) == "0." + "0" * 29 + "3",
@@ -379,11 +403,15 @@ def run_regressions() -> None:
 		initial_digits=260,
 		precision_step=120,
 	).evaluate("121!"))
+	checks.append((
+		"121! initial display uses compact integer head+exp",
+		display_ctrl_fact.get_text() == "809429852527e+189",
+	))
 	for _ in range(5):
 		display_ctrl_fact._advance_scientific(1)
 	expected_actual.append((
 		"121! ctrl+copy from shifted view",
-		"8.094298525273443e+200",
+		"8.0942985252734437e+200",
 		display_ctrl_fact.get_copy_text(standard_scientific=True),
 	))
 	checks.append((

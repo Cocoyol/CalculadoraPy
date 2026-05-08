@@ -86,12 +86,15 @@ class CalculatorApp:
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Si no se inyecta un motor, se conserva el legacy por compatibilidad
+        # con arneses y pruebas que instancian la ventana directamente.
         self.engine = engine if engine is not None else CalculatorEngine()
         self._inv_mode = False
         self._last_engine_result: str | None = None
         self._shift_copy = False
         self._ctrl_copy = False
         self._background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="calculator")
+        self._background_futures = []
         self._background_job_seq = 0
         self._active_background_job_id = 0
         self._closing = False
@@ -294,6 +297,7 @@ class CalculatorApp:
             getattr(self, f"_f_{name}").config(size=new_size)
 
     def _next_background_job_id(self) -> int:
+        self._cancel_pending_background_jobs()
         self._background_job_seq += 1
         self._active_background_job_id = self._background_job_seq
         return self._active_background_job_id
@@ -317,6 +321,11 @@ class CalculatorApp:
         else:
             self.result_display.mark_precision_exhausted()
 
+    def _clear_engine_precision_state(self):
+        clearer = getattr(self.engine, "clear_last_calculation", None)
+        if callable(clearer):
+            clearer()
+
     def _schedule_on_ui_thread(self, callback, job_id: int | None = None):
         if self._closing:
             return
@@ -333,13 +342,27 @@ class CalculatorApp:
         except tk.TclError:
             pass
 
+    def _cancel_pending_background_jobs(self):
+        active_futures = []
+        for future in self._background_futures:
+            if future.done():
+                continue
+            if future.running():
+                active_futures.append(future)
+                continue
+            if not future.cancel():
+                active_futures.append(future)
+        self._background_futures = active_futures
+
     def _submit_background(self, fn) -> bool:
         if self._closing:
             return False
         try:
-            self._background_executor.submit(fn)
+            future = self._background_executor.submit(fn)
         except RuntimeError:
             return False
+        self._background_futures = [tracked for tracked in self._background_futures if not tracked.done()]
+        self._background_futures.append(future)
         return True
 
     def _on_close(self):
@@ -347,6 +370,7 @@ class CalculatorApp:
             return
         self._closing = True
         self._background_executor.shutdown(wait=False, cancel_futures=True)
+        self._background_futures.clear()
         self.root.destroy()
 
     # ── Acciones ─────────────────────────────────────────────────
@@ -354,10 +378,11 @@ class CalculatorApp:
     def _on_key(self, action: str):
         if action == "clear":
             self._next_background_job_id()
+            self._clear_engine_precision_state()
             self.expr_var.set("")
             self.result_display.set_text("0")
             self.result_display.finish_loading_more()
-            self.result_display.reset_precision_exhausted()
+            self.result_display.mark_precision_exhausted()
             self._last_engine_result = None
         elif action == "backspace":
             cur = self.expr_var.get()
@@ -439,8 +464,10 @@ class CalculatorApp:
                 msg = str(exc) if str(exc) else error_name
 
                 def _apply_error():
+                    self._clear_engine_precision_state()
                     self._last_engine_result = None
                     self.result_display.set_text(f"Error: {msg}")
+                    self.result_display.mark_precision_exhausted()
 
                 self._schedule_on_ui_thread(_apply_error, job_id=job_id)
 
@@ -491,10 +518,17 @@ class CalculatorApp:
                     )
 
                 self._schedule_on_ui_thread(_apply_updated_result, job_id=job_id)
-            except Exception:
-                pass
+            except (ValueError, ZeroDivisionError, OverflowError,
+                    ArithmeticError, TypeError):
+                self._schedule_on_ui_thread(
+                    self.result_display.mark_precision_exhausted,
+                    job_id=job_id,
+                )
             finally:
-                self._schedule_on_ui_thread(self.result_display.finish_loading_more)
+                self._schedule_on_ui_thread(
+                    self.result_display.finish_loading_more,
+                    job_id=job_id,
+                )
 
         submitted = self._submit_background(_run)
         if not submitted:
