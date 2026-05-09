@@ -57,6 +57,7 @@ class ResultDisplay:
         self._sci_initial_text = "0"
         self._sci_source_kind = None
         self._dot_start_transition_active = False
+        self._plain_decimal_exit_transition_active = False
         self._scientific_initial_bridge_active = False
         self._reset_scientific_caches()
         self._setup_bindings()
@@ -84,6 +85,7 @@ class ResultDisplay:
         if not preserve_view:
             self._precision_exhausted = False
             self._dot_start_transition_active = False
+            self._plain_decimal_exit_transition_active = False
             self._scientific_initial_bridge_active = False
 
         scientific = self._parse_scientific(text)
@@ -512,11 +514,7 @@ class ResultDisplay:
         precomputed_shift_text: tuple[int, str] | None = None
         if (
             direction > 0
-            and self._sci_shift == 0
-            and self._sci_source_kind == "scientific"
-            and not self._initial_text_fits_visible_window()
-            and len(self._sci_digits) > 1
-            and not self._scientific_initial_bridge_active
+            and self._should_use_initial_scientific_bridge()
         ):
             bridge_text = self._build_initial_scientific_bridge_text()
             if bridge_text != self._var.get():
@@ -537,11 +535,23 @@ class ResultDisplay:
         if direction > 0 and self._scientific_initial_bridge_active:
             self._scientific_initial_bridge_active = False
 
+        if direction > 0 and self._plain_decimal_exit_transition_active:
+            self._plain_decimal_exit_transition_active = False
+
         if direction > 0:
             if self._is_plain_decimal_dot_start_state() and self._sci_exponent < 0:
                 transition_text = self._build_dot_start_transition_text()
                 if transition_text != self._var.get():
                     self._dot_start_transition_active = True
+                    self._var.set(transition_text)
+                    self._entry.after(0, self._scroll_to_start)
+                    self._maybe_request_more_scientific(direction)
+                    return
+
+            if self._should_use_plain_decimal_exit_transition():
+                transition_text, _ = self._build_shifted_scientific_text(self._sci_shift)
+                if transition_text != self._var.get():
+                    self._plain_decimal_exit_transition_active = True
                     self._var.set(transition_text)
                     self._entry.after(0, self._scroll_to_start)
                     self._maybe_request_more_scientific(direction)
@@ -586,7 +596,9 @@ class ResultDisplay:
                         break
                 candidate += 1
         elif direction < 0:
-            if self._dot_start_transition_active:
+            if self._plain_decimal_exit_transition_active:
+                self._plain_decimal_exit_transition_active = False
+            elif self._dot_start_transition_active:
                 # Retroceso desde el puente científico temporal (x.xxxe-y)
                 # hacia la vista con punto inicial (….xxxx) sin perder el paso.
                 self._dot_start_transition_active = False
@@ -666,6 +678,12 @@ class ResultDisplay:
                 self._entry.after(0, self._scroll_to_start)
                 return
 
+            if self._plain_decimal_exit_transition_active:
+                text, _ = self._build_shifted_scientific_text(shift)
+                self._var.set(text)
+                self._entry.after(0, self._scroll_to_start)
+                return
+
             if (
                 precomputed_shift_text is not None
                 and precomputed_shift_text[0] == shift
@@ -693,6 +711,10 @@ class ResultDisplay:
         full_integer = self._build_initial_full_integer_text(capacity)
         if full_integer is not None:
             return full_integer
+
+        plain_decimal = self._build_initial_plain_decimal_text(capacity)
+        if plain_decimal is not None:
+            return plain_decimal
 
         if self._sci_source_kind != "decimal":
             return text
@@ -723,6 +745,32 @@ class ResultDisplay:
 
         return f"{self._sci_sign}{digits}{'0' * scale}"
 
+    def _build_initial_plain_decimal_text(self, capacity: int) -> str | None:
+        if self._sci_source_kind != "scientific":
+            return None
+        if self._is_exact_integer_scientific_value():
+            return None
+
+        digits = self._sci_digits
+        if not digits:
+            return None
+
+        decimal_pos = self._sci_exponent + 1
+        if decimal_pos <= 0:
+            return None
+
+        digit_capacity = max(1, capacity - len(self._sci_sign))
+        fractional_capacity = digit_capacity - decimal_pos - 1
+        if fractional_capacity < 1:
+            return None
+
+        integer_digits = digits[:decimal_pos]
+        fractional_digits = digits[decimal_pos : decimal_pos + fractional_capacity]
+        if not integer_digits or not fractional_digits:
+            return None
+
+        return f"{self._sci_sign}{integer_digits}.{fractional_digits}"
+
     def _build_initial_compact_integer_text(self, capacity: int) -> str | None:
         if not self._is_exact_integer_scientific_value():
             return None
@@ -732,24 +780,44 @@ class ResultDisplay:
             return None
 
         sign = self._sci_sign
-        digit_budget = max(1, capacity - len(sign) - 3)
-        exp_text = "+0"
-
-        for _ in range(3):
-            compact_exponent = self._sci_exponent - digit_budget + 1
-            exp_text = f"{compact_exponent:+d}"
-            next_budget = max(1, capacity - len(sign) - len(exp_text) - 1)
-            if next_budget == digit_budget:
-                break
-            digit_budget = next_budget
+        exp_text = f"{self._sci_exponent:+d}"
+        mantissa_budget = max(1, capacity - len(sign) - len(exp_text) - 1)
+        digit_budget = mantissa_budget if mantissa_budget <= 1 else mantissa_budget - 1
 
         shown_digits = digits[:digit_budget]
         if not shown_digits:
             return None
 
-        compact_exponent = self._sci_exponent - len(shown_digits) + 1
-        exp_text = f"{compact_exponent:+d}"
-        return f"{sign}{shown_digits}e{exp_text}"
+        mantissa = self._format_mantissa_for_copy(shown_digits)
+        return f"{sign}{mantissa}e{exp_text}"
+
+    def _should_use_initial_scientific_bridge(self) -> bool:
+        if self._sci_shift != 0:
+            return False
+        if self._scientific_initial_bridge_active:
+            return False
+        if len(self._sci_digits) <= 1:
+            return False
+        if self._sci_exponent >= 0:
+            return False
+        if self._build_initial_plain_decimal_text(self._initial_visible_capacity_chars()) is not None:
+            return False
+        if self._initial_text_fits_visible_window():
+            return False
+        if self._sci_source_kind == "scientific":
+            return True
+        return self._sci_source_kind == "decimal" and self._is_exact_integer_scientific_value()
+
+    def _should_use_plain_decimal_exit_transition(self) -> bool:
+        if self._sci_shift <= 0:
+            return False
+        if self._sci_exponent < 0:
+            return False
+        if self._plain_decimal_exit_transition_active:
+            return False
+        if not self._should_render_plain_decimal_window(self._sci_shift):
+            return False
+        return self._plain_decimal_dot_position(self._sci_shift) == 0
 
     def _is_plain_decimal_dot_start_state(self) -> bool:
         if self._sci_shift <= 0:

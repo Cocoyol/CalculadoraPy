@@ -11,6 +11,7 @@ from tkinter import font as tkfont
 
 from calculator_engine import CalculatorEngine
 from calculator_ui_results import ResultDisplay
+from calculator_ui_settings import open_settings_dialog
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -190,6 +191,14 @@ class CalculatorApp:
             command=self._toggle_inv,
         )
         self.inv_btn.pack(side="left")
+
+        self._settings_btn = tk.Button(
+            frame, text="\u2699", font=self._f_small,
+            bg=self.C["toggle_off"], fg="#F9E2AF",
+            activebackground=self.C["special"], relief="flat",
+            cursor="hand2", command=self._open_settings,
+        )
+        self._settings_btn.pack(side="right")
 
     # ── Panel de funciones científicas ───────────────────────────
 
@@ -437,6 +446,11 @@ class CalculatorApp:
             for col, spec in enumerate(self.SCIENCE_BUTTONS):
                 self._sci_buttons[col].config(text=spec[0])
         self.expr_entry.focus_set()
+
+    # ── Diálogo de configuración ─────────────────────────────────
+
+    def _open_settings(self):
+        open_settings_dialog(self)
 
     # ── Cálculo en hilo separado ─────────────────────────────────
 
