@@ -6,7 +6,7 @@ from calculator_engine import CalculatorEngine
 from calculator_ui import CalculatorApp
 
 
-USE_ARBITRARY_PRECISION = True
+USE_ARBITRARY_PRECISION = True  # False conserva el motor legacy solo como fallback/pruebas.
 AP_INITIAL_DIGITS = 120
 AP_PRECISION_STEP = 120
 
