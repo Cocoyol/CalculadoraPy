@@ -8,9 +8,9 @@ gradual y lógica de representación científica desplazable.
 import tkinter as tk
 import re
 
+from calculator_config_normalizations import get_visible_chars
 
 _CACHE_UNSET = object()
-
 
 # ═════════════════════════════════════════════════════════════════
 #  Widget: campo de resultado con scroll lateral gradual
@@ -27,7 +27,7 @@ class ResultDisplay:
     DRAG_MAX_PENDING_STEPS = 8  # pasos acumulados máximos para evitar saltos bruscos
     PREFETCH_MARGIN = 30    # solicitar más precisión antes del final
     SCI_FRACTION_WINDOW = 30    # dígitos de precisión que se muestran en modo científico antes de solicitar más
-    VISIBLE_CHARS = 17       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
+    VISIBLE_CHARS = get_visible_chars()       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
     PLAIN_TAIL_LAST_EXPONENT = 4    # último exponente para mostrar cola fija sin exponente en modo desplazado
 
     _SCI_RE = re.compile(
@@ -730,11 +730,12 @@ class ResultDisplay:
     def _initial_visible_text(self) -> str:
         text = self._sci_initial_text
         capacity = self._initial_visible_capacity_chars()
-        full_integer = self._build_initial_full_integer_text(capacity)
+        plain_capacity = self._initial_plain_visible_capacity_chars()
+        full_integer = self._build_initial_full_integer_text(plain_capacity)
         if full_integer is not None:
             return full_integer
 
-        plain_decimal = self._build_initial_plain_decimal_text(capacity)
+        plain_decimal = self._build_initial_plain_decimal_text(plain_capacity)
         if plain_decimal is not None:
             return plain_decimal
 
@@ -744,7 +745,9 @@ class ResultDisplay:
         if len(text) <= capacity:
             return text
 
-        compact_integer = self._build_initial_compact_integer_text(capacity)
+        compact_integer = self._build_initial_compact_integer_text(
+            self._initial_scientific_visible_capacity_chars()
+        )
         if compact_integer is not None:
             return compact_integer
 
@@ -842,7 +845,7 @@ class ResultDisplay:
             return False
         if self._sci_exponent >= 0:
             return False
-        if self._build_initial_plain_decimal_text(self._initial_visible_capacity_chars()) is not None:
+        if self._build_initial_plain_decimal_text(self._initial_plain_visible_capacity_chars()) is not None:
             return False
         if self._initial_text_fits_visible_window():
             return False
@@ -879,7 +882,7 @@ class ResultDisplay:
         mantissa_digits = digits[effective_shift:] or "0"
         exponent = self._sci_exponent - effective_shift
         exp_text = f"e{exponent:+d}"
-        budget = max(1, self._initial_visible_capacity_chars() - len(sign) - len(exp_text))
+        budget = max(1, self._initial_scientific_visible_capacity_chars() - len(sign) - len(exp_text))
 
         if budget == 1:
             mantissa = mantissa_digits[0]
@@ -935,7 +938,7 @@ class ResultDisplay:
     def _format_initial_scientific(self) -> str:
         exponent = self._sci_exponent
         exp_text = f"e{exponent:+d}"
-        budget = max(1, self._initial_visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
+        budget = max(1, self._initial_scientific_visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
 
         if budget == 1:
             mantissa = self._sci_digits[0]
@@ -952,15 +955,22 @@ class ResultDisplay:
     def _visible_capacity_chars(self) -> int:
         return self.VISIBLE_CHARS
 
-    def _initial_visible_capacity_chars(self) -> int:
-        """Capacity for the initial (unshifted) display: +1 for negative sign."""
+    def _initial_plain_visible_capacity_chars(self) -> int:
+        return self.VISIBLE_CHARS
+
+    def _initial_scientific_visible_capacity_chars(self) -> int:
         if self._sci_sign == "-":
             return self.VISIBLE_CHARS + 1
         return self.VISIBLE_CHARS
 
+    def _initial_visible_capacity_chars(self) -> int:
+        if self._sci_source_kind == "decimal":
+            return self._initial_plain_visible_capacity_chars()
+        return self._initial_scientific_visible_capacity_chars()
+
     def _initial_scientific_visible_digits(self) -> int:
         exp_text = f"e{self._sci_exponent:+d}"
-        budget = max(1, self._initial_visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
+        budget = max(1, self._initial_scientific_visible_capacity_chars() - len(self._sci_sign) - len(exp_text))
         if budget <= 2:
             return budget
         return budget - 1
@@ -997,13 +1007,14 @@ class ResultDisplay:
             return True
 
         capacity = self._initial_visible_capacity_chars()
-        if self._build_initial_full_integer_text(capacity) is not None:
+        plain_capacity = self._initial_plain_visible_capacity_chars()
+        if self._build_initial_full_integer_text(plain_capacity) is not None:
             return True
 
         if self._sci_source_kind != "scientific":
             return len(text) <= capacity
 
-        if self._initial_plain_decimal_shows_complete_value(capacity):
+        if self._initial_plain_decimal_shows_complete_value(plain_capacity):
             return True
 
         if self._build_initial_compact_integer_exponent_text(capacity) is not None:

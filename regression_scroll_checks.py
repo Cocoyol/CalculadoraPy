@@ -573,7 +573,7 @@ def run_regressions() -> None:
 		not any(re.fullmatch(r"[+-]?\d(?:\.\d+)?e-1", text) for text in states_20_20),
 	))
 
-	# Números negativos: el cálculo inicial muestra signo + 17 dígitos (18 chars)
+	# Números negativos decimales: el cálculo inicial incluye el signo en VISIBLE_CHARS.
 	display_neg_dec = _make_display(ArbitraryPrecisionCalculatorEngine(
 		initial_digits=260,
 		precision_step=120,
@@ -581,18 +581,78 @@ def run_regressions() -> None:
 	neg_dec_initial = display_neg_dec.get_text()
 	expected_actual.append((
 		"-23/27 initial display",
-		"-0.851851851851851",
+		"-0.85185185185185",
 		neg_dec_initial,
 	))
 	checks.append((
-		"-23/27 initial has sign + 17 digits (18 chars)",
-		len(neg_dec_initial) == 18 and neg_dec_initial.startswith("-"),
+		"-23/27 initial has 17 chars including sign",
+		len(neg_dec_initial) == 17 and neg_dec_initial.startswith("-"),
 	))
-	# Al desplazar a la derecha se restaura a 17 chars de cuerpo
+	display_neg_9999_77 = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("0-9999/77"))
+	neg_9999_77_initial = display_neg_9999_77.get_text()
+	display_neg_9999_77._advance_scientific(1)
+	neg_9999_77_first = display_neg_9999_77.get_text()
+	display_neg_9999_77._advance_scientific(1)
+	neg_9999_77_second = display_neg_9999_77.get_text()
+	expected_actual.append((
+		"-9999/77 initial display",
+		"-129.857142857142",
+		neg_9999_77_initial,
+	))
+	expected_actual.append((
+		"-9999/77 first shift display",
+		"-…29.8571428571428",
+		neg_9999_77_first,
+	))
+	expected_actual.append((
+		"-9999/77 second shift display",
+		"-…9.85714285714285",
+		neg_9999_77_second,
+	))
+	checks.append((
+		"-9999/77 first shift adds one right-side digit",
+		neg_9999_77_initial == "-129.857142857142"
+		and neg_9999_77_first == "-…29.8571428571428"
+		and neg_9999_77_second == "-…9.85714285714285",
+	))
+	display_neg_large_decimal = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("0-12345678901234567/1000"))
+	neg_large_decimal_initial = display_neg_large_decimal.get_text()
+	display_neg_large_decimal._advance_scientific(1)
+	neg_large_decimal_first = display_neg_large_decimal.get_text()
+	display_neg_large_decimal._advance_scientific(1)
+	neg_large_decimal_second = display_neg_large_decimal.get_text()
+	expected_actual.append((
+		"-12345678901234567/1000 initial display",
+		"-12345678901234.5",
+		neg_large_decimal_initial,
+	))
+	expected_actual.append((
+		"-12345678901234567/1000 first shift display",
+		"-…2345678901234.56",
+		neg_large_decimal_first,
+	))
+	expected_actual.append((
+		"-12345678901234567/1000 second shift display",
+		"-…345678901234.567",
+		neg_large_decimal_second,
+	))
+	checks.append((
+		"negative plain decimal from scientific source counts sign initially",
+		neg_large_decimal_initial == "-12345678901234.5"
+		and neg_large_decimal_first == "-…2345678901234.56"
+		and neg_large_decimal_second == "-…345678901234.567",
+	))
+	# Al desplazar a la derecha se conserva el signo y entra el carácter extra de scroll.
 	display_neg_dec._advance_scientific(1)
 	neg_dec_shifted = display_neg_dec.get_text()
 	checks.append((
-		"-23/27 first shift reverts to 17-char body",
+		"-23/27 first shift keeps 17 chars besides ellipsis",
 		len(neg_dec_shifted.replace("…", "")) == 17,
 	))
 	# Regreso al inicio restaura la vista expandida
@@ -645,6 +705,28 @@ def run_regressions() -> None:
 	checks.append((
 		"-25^25 scroll back restores expanded initial",
 		display_neg_sci.get_text() == neg_sci_initial,
+	))
+	display_neg_fact_decimal_source = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("-90!"))
+	neg_fact_decimal_source_initial = display_neg_fact_decimal_source.get_text()
+	display_neg_fact_decimal_source._advance_scientific(1)
+	neg_fact_decimal_source_first = display_neg_fact_decimal_source.get_text()
+	expected_actual.append((
+		"-90! initial display from decimal source",
+		"-1.4857159644e+138",
+		neg_fact_decimal_source_initial,
+	))
+	expected_actual.append((
+		"-90! first shift from decimal source",
+		"-…48571596448e+127",
+		neg_fact_decimal_source_first,
+	))
+	checks.append((
+		"-90! compact scientific initial keeps sign outside visible budget",
+		neg_fact_decimal_source_initial == "-1.4857159644e+138"
+		and neg_fact_decimal_source_first == "-…48571596448e+127",
 	))
 
 	# Números positivos no deben cambiar (siguen con 17 chars)
