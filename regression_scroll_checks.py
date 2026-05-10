@@ -292,6 +292,23 @@ def run_regressions() -> None:
 		"18-digit integer first shift no longer shows hidden decimal-position bridge",
 		display_18_digit_integer.get_text() != "….234567890123e+17",
 	))
+	display_integer_exp_tail = _make_display(engine_initial_scientific.evaluate("1600591090853e+26"))
+	integer_exp_tail_initial = display_integer_exp_tail.get_text()
+	display_integer_exp_tail._advance_scientific(1)
+	integer_exp_tail_right = display_integer_exp_tail.get_text()
+	display_integer_exp_tail._advance_scientific(1)
+	integer_exp_tail_second_right = display_integer_exp_tail.get_text()
+	display_integer_exp_tail._advance_scientific(-1)
+	checks.append((
+		"integer exponent tail first shift shows full compact integer",
+		integer_exp_tail_initial == "1.60059109085e+38"
+		and integer_exp_tail_right == "1600591090853e+26",
+	))
+	checks.append((
+		"integer exponent tail does not scroll past compact full value",
+		integer_exp_tail_second_right == "1600591090853e+26"
+		and display_integer_exp_tail.get_text() == integer_exp_tail_initial,
+	))
 	engine_initial_decimal = ArbitraryPrecisionCalculatorEngine()
 	display_exp_12 = _make_display(engine_initial_decimal.evaluate("8.6^12.85"))
 	display_exp_14 = _make_display(engine_initial_decimal.evaluate("12345678901234567890123/10^8"))
@@ -307,6 +324,22 @@ def run_regressions() -> None:
 	checks.append((
 		"exponent 15 initial view stays scientific when only the point fits",
 		display_exp_15.get_text() == "1.23456789012e+15",
+	))
+	display_fit_decimal_17 = _make_display(engine_initial_decimal.evaluate("1234567891234567/10"))
+	fit_decimal_17_initial = display_fit_decimal_17.get_text()
+	display_fit_decimal_17._advance_scientific(1)
+	checks.append((
+		"17-char decimal from scientific source stays non-scrollable",
+		fit_decimal_17_initial == "123456789123456.7"
+		and display_fit_decimal_17.get_text() == fit_decimal_17_initial,
+	))
+	display_fit_decimal_short = _make_display(engine_initial_decimal.evaluate("12345678912345/10"))
+	fit_decimal_short_initial = display_fit_decimal_short.get_text()
+	display_fit_decimal_short._advance_scientific(1)
+	checks.append((
+		"shorter decimal from scientific source stays non-scrollable",
+		fit_decimal_short_initial == "1234567891234.5"
+		and display_fit_decimal_short.get_text() == fit_decimal_short_initial,
 	))
 	_, _, states_9_5_20_7 = _walk("9.5^20.7", steps=30, initial_digits=260)
 	checks.append((

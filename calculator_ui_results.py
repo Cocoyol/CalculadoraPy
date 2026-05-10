@@ -59,6 +59,7 @@ class ResultDisplay:
         self._dot_start_transition_active = False
         self._plain_decimal_exit_transition_active = False
         self._scientific_initial_bridge_active = False
+        self._compact_integer_exponent_active = False
         self._reset_scientific_caches()
         self._setup_bindings()
 
@@ -87,6 +88,7 @@ class ResultDisplay:
             self._dot_start_transition_active = False
             self._plain_decimal_exit_transition_active = False
             self._scientific_initial_bridge_active = False
+            self._compact_integer_exponent_active = False
 
         scientific = self._parse_scientific(text)
         if scientific is not None:
@@ -512,6 +514,10 @@ class ResultDisplay:
 
     def _advance_scientific(self, direction: int):
         precomputed_shift_text: tuple[int, str] | None = None
+        if direction > 0 and self._compact_integer_exponent_active:
+            self._render_scientific()
+            return
+
         if (
             direction > 0
             and self._should_use_initial_scientific_bridge()
@@ -531,6 +537,16 @@ class ResultDisplay:
         ):
             self._render_scientific()
             return
+
+        if direction > 0 and self._sci_shift == 0:
+            compact_integer = self._build_initial_compact_integer_exponent_text(
+                self._initial_visible_capacity_chars()
+            )
+            if compact_integer is not None and compact_integer != self._var.get():
+                self._compact_integer_exponent_active = True
+                self._var.set(compact_integer)
+                self._entry.after(0, self._scroll_to_start)
+                return
 
         if direction > 0 and self._scientific_initial_bridge_active:
             self._scientific_initial_bridge_active = False
@@ -596,7 +612,9 @@ class ResultDisplay:
                         break
                 candidate += 1
         elif direction < 0:
-            if self._plain_decimal_exit_transition_active:
+            if self._compact_integer_exponent_active:
+                self._compact_integer_exponent_active = False
+            elif self._plain_decimal_exit_transition_active:
                 self._plain_decimal_exit_transition_active = False
             elif self._dot_start_transition_active:
                 # Retroceso desde el puente científico temporal (x.xxxe-y)
@@ -667,7 +685,11 @@ class ResultDisplay:
 
         self._sci_shift = shift
         if shift == 0:
-            if self._scientific_initial_bridge_active:
+            if self._compact_integer_exponent_active:
+                text = self._build_initial_compact_integer_exponent_text(
+                    self._initial_visible_capacity_chars()
+                ) or self._initial_visible_text()
+            elif self._scientific_initial_bridge_active:
                 text = self._build_initial_scientific_bridge_text()
             else:
                 text = self._initial_visible_text()
@@ -790,6 +812,26 @@ class ResultDisplay:
 
         mantissa = self._format_mantissa_for_copy(shown_digits)
         return f"{sign}{mantissa}e{exp_text}"
+
+    def _build_initial_compact_integer_exponent_text(self, capacity: int) -> str | None:
+        if not self._is_exact_integer_scientific_value():
+            return None
+
+        digits = self._sci_digits
+        if not digits:
+            return None
+
+        scale = self._sci_exponent - (len(digits) - 1)
+        if scale <= 0:
+            return None
+
+        if len(digits) <= self._initial_scientific_visible_digits():
+            return None
+
+        text = f"{self._sci_sign}{digits}e{scale:+d}"
+        if len(text) > capacity:
+            return None
+        return text
 
     def _should_use_initial_scientific_bridge(self) -> bool:
         if self._sci_shift != 0:
@@ -961,6 +1003,12 @@ class ResultDisplay:
         if self._sci_source_kind != "scientific":
             return len(text) <= capacity
 
+        if self._initial_plain_decimal_shows_complete_value(capacity):
+            return True
+
+        if self._build_initial_compact_integer_exponent_text(capacity) is not None:
+            return False
+
         if len(text) < capacity:
             return True
         if len(text) > capacity:
@@ -969,6 +1017,15 @@ class ResultDisplay:
         if len(self._sci_digits) <= self._initial_scientific_visible_digits():
             return True
         return False
+
+    def _initial_plain_decimal_shows_complete_value(self, capacity: int) -> bool:
+        if self._build_initial_plain_decimal_text(capacity) is None:
+            return False
+
+        decimal_pos = self._sci_exponent + 1
+        digit_capacity = max(1, capacity - len(self._sci_sign))
+        fractional_capacity = digit_capacity - decimal_pos - 1
+        return decimal_pos + fractional_capacity >= len(self._sci_digits)
 
     @staticmethod
     def _count_trailing_zeros(text: str) -> int:
