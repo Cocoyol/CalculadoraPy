@@ -91,6 +91,7 @@ class ArbitraryPrecisionCalculatorEngine:
     """Evalúa expresiones con precisión arbitraria y dígitos progresivos."""
 
     SCI_NOTATION_EXP_LIMIT = 12
+    COMPLEX_DISPLAY_DIGITS = 8
 
     def __init__(self, initial_digits: int = 18, precision_step: int = 24):
         self._provider = MPMathProvider()
@@ -280,8 +281,9 @@ class ArbitraryPrecisionCalculatorEngine:
             return f"{value:.15g}"
 
         if isinstance(value, mp.mpc):
-            real = mp.nstr(value.real, n=digits)
-            imag = mp.nstr(abs(value.imag), n=digits)
+            complex_digits = min(digits, ArbitraryPrecisionCalculatorEngine.COMPLEX_DISPLAY_DIGITS)
+            real = mp.nstr(value.real, n=complex_digits)
+            imag = mp.nstr(abs(value.imag), n=complex_digits)
             sign = "+" if value.imag >= 0 else "-"
             return f"({real} {sign} {imag}j)"
 

@@ -18,6 +18,8 @@ from formula_evaluator import FormulaEvaluator, PythonMathProvider
 class CalculatorEngine:
     """Motor legacy/fallback para expresiones matemáticas científicas."""
 
+    COMPLEX_DISPLAY_DIGITS = 8
+
     def __init__(self):
         self._provider = PythonMathProvider()
         self._evaluator = FormulaEvaluator(self._provider)
@@ -54,7 +56,10 @@ class CalculatorEngine:
     @staticmethod
     def _format_result(value) -> str:
         if isinstance(value, complex):
-            return str(value)
+            real = f"{value.real:.{CalculatorEngine.COMPLEX_DISPLAY_DIGITS}g}"
+            imag = f"{abs(value.imag):.{CalculatorEngine.COMPLEX_DISPLAY_DIGITS}g}"
+            sign = "+" if value.imag >= 0 else "-"
+            return f"({real} {sign} {imag}j)"
 
         if isinstance(value, float):
             if math.isnan(value):

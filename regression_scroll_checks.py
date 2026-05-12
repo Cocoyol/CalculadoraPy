@@ -379,9 +379,23 @@ def run_regressions() -> None:
 
 	engine_complex = ArbitraryPrecisionCalculatorEngine(initial_digits=120, precision_step=120)
 	complex_value = engine_complex.evaluate("asin(3)")
+	display_complex = _make_display(complex_value)
+	expected_actual.append((
+		"asin(3) complex display precision",
+		"(1.5707963 - 1.7627472j)",
+		complex_value,
+	))
+	expected_actual.append((
+		"asin(3) complex copy precision",
+		"(1.5707963 - 1.7627472j)",
+		display_complex.get_copy_text(),
+	))
 	checks.append((
-		"complex result uses initial precision only",
-		"j)" in complex_value and not engine_complex.can_expand_precision(),
+		"complex result displays and copies at 8-digit precision",
+		complex_value == "(1.5707963 - 1.7627472j)"
+		and display_complex.get_text() == complex_value
+		and display_complex.get_copy_text() == complex_value
+		and not engine_complex.can_expand_precision(),
 	))
 	try:
 		engine_complex.request_more_precision()
