@@ -538,6 +538,16 @@ class ResultDisplay:
             self._render_scientific()
             return
 
+        if direction > 0 and self._current_plain_decimal_window_shows_complete_value():
+            self._render_scientific()
+            return
+
+        if direction > 0 and self._current_shifted_scientific_shows_complete_value():
+            return
+
+        if direction > 0 and self._current_initial_scientific_bridge_shows_complete_value():
+            return
+
         if direction > 0 and self._sci_shift == 0:
             compact_integer = self._build_initial_compact_integer_exponent_text(
                 self._initial_visible_capacity_chars()
@@ -555,6 +565,22 @@ class ResultDisplay:
             self._plain_decimal_exit_transition_active = False
 
         if direction > 0:
+            if self._dot_start_transition_active:
+                bridge_digits = self._visible_scientific_digits_count(self._var.get())
+                if bridge_digits is not None and bridge_digits < len(self._sci_digits):
+                    candidate = min(
+                        self._sci_shift + 1,
+                        max(0, len(self._virtual_digits_for_shifting()) - 1),
+                    )
+                    candidate_text, _ = self._build_shifted_scientific_text(candidate)
+                    if candidate_text != self._var.get():
+                        self._sci_shift = candidate
+                        self._dot_start_transition_active = False
+                        precomputed_shift_text = (candidate, candidate_text)
+                        self._render_scientific(precomputed_shift_text=precomputed_shift_text)
+                        self._maybe_request_more_scientific(direction)
+                        return
+
             if self._is_plain_decimal_dot_start_state() and self._sci_exponent < 0:
                 transition_text = self._build_dot_start_transition_text()
                 if transition_text != self._var.get():
@@ -581,7 +607,7 @@ class ResultDisplay:
             current_plain_dot_pos = self._plain_decimal_dot_position(self._sci_shift)
             while candidate > 0 and candidate <= max_shift:
                 _, is_full_width = self._build_shifted_scientific_text(candidate)
-                plain_decimal = self._should_render_plain_decimal_window(candidate)
+                plain_decimal = self._build_plain_decimal_window_text(candidate) is not None
                 allow_underfull = self._allow_underfull_progress(candidate)
                 if (
                     is_full_width
@@ -675,7 +701,11 @@ class ResultDisplay:
         shift = max(0, self._sci_shift)
         if not (
             self._allow_underfull_progress(shift)
-            or self._should_render_plain_decimal_window(shift)
+            or self._build_plain_decimal_window_text(shift) is not None
+            or (
+                precomputed_shift_text is not None
+                and precomputed_shift_text[0] == shift
+            )
         ):
             while shift > 0:
                 _, is_full_width = self._build_shifted_scientific_text(shift)
@@ -895,6 +925,29 @@ class ResultDisplay:
             mantissa = f"{mantissa_digits[0]}.{frac}" if frac else mantissa_digits[0]
 
         return f"{sign}{mantissa}{exp_text}"
+
+    def _visible_scientific_digits_count(self, text: str) -> int | None:
+        parsed = self._parse_visible_scientific_for_copy(text)
+        if parsed is None:
+            return None
+
+        _, digits, _ = parsed
+        return len(digits)
+
+    def _current_initial_scientific_bridge_shows_complete_value(self) -> bool:
+        if not self._scientific_initial_bridge_active:
+            return False
+
+        text = self._var.get().strip()
+        match = re.fullmatch(
+            r"(?P<sign>[+-]?)…\.(?P<frac>\d+)[eE](?P<exp>[+-]?\d+)",
+            text,
+        )
+        if not match:
+            return False
+
+        shown_digits = 1 + len(match.group("frac"))
+        return shown_digits >= len(self._sci_digits)
 
     def _build_initial_scientific_bridge_text(self) -> str:
         sign = self._sci_sign
@@ -1190,6 +1243,21 @@ class ResultDisplay:
         if shift in self._plain_decimal_right_edge_cache:
             return self._plain_decimal_right_edge_cache[shift]
 
+        if self._build_first_shift_dot_start_text(shift) is not None:
+            digits = self._virtual_digits_for_shifting()
+            if not digits:
+                self._plain_decimal_right_edge_cache[shift] = None
+                return None
+
+            body_width = max(1, self._visible_capacity_chars() - len(self._sci_sign))
+            frac_width = max(1, body_width - 1)
+            decimal_index = self._sci_exponent + 1
+            leading_zeros = max(0, -decimal_index)
+            effective_shift = self._effective_shift(shift)
+            result = max(0, min(len(digits), effective_shift + frac_width - leading_zeros))
+            self._plain_decimal_right_edge_cache[shift] = result
+            return result
+
         if not self._should_render_plain_decimal_window(shift):
             self._plain_decimal_right_edge_cache[shift] = None
             return None
@@ -1219,6 +1287,10 @@ class ResultDisplay:
         if shift in self._plain_decimal_dot_position_cache:
             return self._plain_decimal_dot_position_cache[shift]
 
+        if self._build_first_shift_dot_start_text(shift) is not None:
+            self._plain_decimal_dot_position_cache[shift] = 0
+            return 0
+
         if not self._should_render_plain_decimal_window(shift):
             self._plain_decimal_dot_position_cache[shift] = None
             return None
@@ -1228,6 +1300,34 @@ class ResultDisplay:
         result = decimal_index - effective_shift
         self._plain_decimal_dot_position_cache[shift] = result
         return result
+
+    def _current_plain_decimal_window_shows_complete_value(self) -> bool:
+        if self._sci_shift <= 0:
+            return False
+
+        right_edge = self._plain_decimal_right_edge(self._sci_shift)
+        if right_edge is None:
+            return False
+
+        return right_edge >= len(self._virtual_digits_for_shifting())
+
+    def _current_shifted_scientific_shows_complete_value(self) -> bool:
+        if self._sci_shift <= 0:
+            return False
+
+        text = self._var.get()
+        prefix = f"{self._sci_sign}…"
+        if not text.startswith(prefix):
+            return False
+
+        content = text[len(prefix):]
+        match = re.search(r"[eE]([+-]?\d+)$", content)
+        if not match:
+            return False
+
+        shown_exponent = int(match.group(1))
+        total_digits = self._sci_exponent - shown_exponent + 1
+        return total_digits >= len(self._virtual_digits_for_shifting())
 
     def _allow_underfull_progress(self, shift: int) -> bool:
         return shift > 0 and self._can_render_plain_tail()

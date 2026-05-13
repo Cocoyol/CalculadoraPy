@@ -116,7 +116,7 @@ def inspect_scroll_states(
 	print(f"final text:     {end_text}")
 
 
-def run_regressions() -> None:
+def _run_width_17_regressions() -> None:
 	checks: list[tuple[str, bool]] = []
 	expected_actual: list[tuple[str, str, str]] = []
 
@@ -186,6 +186,102 @@ def run_regressions() -> None:
 	second = display.get_text()
 	checks.append(("1/3 initial visible width is 17", len(first) == 17))
 	checks.append(("1/3 after first scroll keeps 17 without ellipsis", len(second.replace("…", "")) == 17))
+
+	_, end_complete_dot_start, states_complete_dot_start = _walk(
+		"0.33333333333333+0.0000000000000045",
+		steps=20,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"complete dot-start decimal stops at width 17",
+		"….3333333333333345",
+		end_complete_dot_start,
+	))
+	checks.append((
+		"complete dot-start decimal avoids scientific bridge at width 17",
+		end_complete_dot_start == "….3333333333333345"
+		and states_complete_dot_start == ["….3333333333333345"],
+	))
+	_, end_small_positive, states_small_positive = _walk(
+		"123456/1e16",
+		steps=5,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"small positive decimal completes after initial truncation",
+		"….0000000000123456",
+		end_small_positive,
+	))
+	checks.append((
+		"small positive decimal does not enter scientific bridge after completion",
+		states_small_positive == ["….0000000000123456"],
+	))
+
+	display_small_negative = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=80,
+		precision_step=120,
+	).evaluate("-123456/1e16"))
+	small_negative_initial = display_small_negative.get_text()
+	display_small_negative._advance_scientific(1)
+	small_negative_first = display_small_negative.get_text()
+	display_small_negative._advance_scientific(1)
+	small_negative_second = display_small_negative.get_text()
+	display_small_negative._advance_scientific(1)
+	expected_actual.append((
+		"small negative decimal first shifted view",
+		"-….000000000012345",
+		small_negative_first,
+	))
+	expected_actual.append((
+		"small negative decimal enters scientific bridge after dot-start",
+		"-1.23456e-11",
+		small_negative_second,
+	))
+	checks.append((
+		"small negative decimal uses scientific bridge when point would be misleading",
+		small_negative_initial == "-0.00000000001234"
+		and small_negative_first == "-….000000000012345"
+		and small_negative_second == "-1.23456e-11"
+		and display_small_negative.get_text() == small_negative_second,
+	))
+	checks.append((
+		"small negative decimal bridge copy stays scientific",
+		display_small_negative.get_copy_text() == "-1.23456e-11",
+	))
+
+	_, end_bridge_exit, states_bridge_exit = _walk(
+		"1234567890124/1e23",
+		steps=8,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"small decimal exits bridge to terminal shifted scientific",
+		"…234567890124e-23",
+		end_bridge_exit,
+	))
+	checks.append((
+		"small decimal bridge exit keeps terminal shifted scientific state",
+		states_bridge_exit == [
+			"….0000000000123456",
+			"1.23456789012e-11",
+			"…234567890124e-23",
+		],
+	))
+
+	_, end_initial_bridge_complete, states_initial_bridge_complete = _walk(
+		"1234567890123/1e24",
+		steps=8,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"complete initial scientific bridge stops instead of oscillating",
+		"….234567890123e-12",
+		end_initial_bridge_complete,
+	))
+	checks.append((
+		"complete initial scientific bridge does not oscillate back to initial view",
+		states_initial_bridge_complete == ["….234567890123e-12"],
+	))
 
 	engine_3e30 = ArbitraryPrecisionCalculatorEngine(initial_digits=18, precision_step=120)
 	value_3e30 = engine_3e30.evaluate("3*10^-30")
@@ -768,6 +864,15 @@ def run_regressions() -> None:
 		raise SystemExit(1)
 
 	print("\nAll regression checks passed.")
+
+
+def run_regressions() -> None:
+	original_visible_chars = ResultDisplay.VISIBLE_CHARS
+	try:
+		ResultDisplay.VISIBLE_CHARS = 17
+		_run_width_17_regressions()
+	finally:
+		ResultDisplay.VISIBLE_CHARS = original_visible_chars
 
 
 if __name__ == "__main__":
