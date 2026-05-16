@@ -866,13 +866,186 @@ def _run_width_17_regressions() -> None:
 	print("\nAll regression checks passed.")
 
 
+def _run_decimal_separator_regressions() -> None:
+	checks: list[tuple[str, bool]] = []
+	expected_actual: list[tuple[str, str, str]] = []
+
+	def _expect_equal(label: str, expected: str, actual: str) -> None:
+		expected_actual.append((label, expected, actual))
+		checks.append((label, expected == actual))
+
+	engine = ArbitraryPrecisionCalculatorEngine(initial_digits=260, precision_step=120)
+
+	display_15_fact = _make_display(engine.evaluate("15!"))
+	_expect_equal(
+		"15! initial display uses thousands separators",
+		"1,307,674,368,000",
+		display_15_fact.get_text(),
+	)
+	display_15_fact._advance_scientific(1)
+	_expect_equal(
+		"15! stays non-scrollable with separators",
+		"1,307,674,368,000",
+		display_15_fact.get_text(),
+	)
+	checks.append((
+		"15! ctrl+copy keeps standard scientific copy usable",
+		display_15_fact.get_copy_text(standard_scientific=True) == "1.307674368e+12",
+	))
+
+	display_neg_decimal = _make_display(engine.evaluate("-11^12-sqrt(2)"))
+	neg_initial = display_neg_decimal.get_text()
+	_expect_equal(
+		"negative decimal initial display uses thousands separators",
+		"-3,138,428,376,722.41",
+		neg_initial,
+	)
+	checks.append((
+		"negative decimal separator display keeps the same digit count",
+		len(neg_initial.replace(",", "").replace("-", "").replace(".", "")) == 15,
+	))
+	display_neg_decimal._advance_scientific(1)
+	_expect_equal(
+		"negative decimal first shift keeps grouped decimal window",
+		"-…138,428,376,722.414",
+		display_neg_decimal.get_text(),
+	)
+	display_neg_decimal._advance_scientific(-1)
+	_expect_equal(
+		"negative decimal scroll back restores grouped initial display",
+		"-3,138,428,376,722.41",
+		display_neg_decimal.get_text(),
+	)
+
+	display_fit_decimal = _make_display(engine.evaluate("1234567891234567/10"))
+	_expect_equal(
+		"fit decimal initial display uses thousands separators",
+		"123,456,789,123,456.7",
+		display_fit_decimal.get_text(),
+	)
+	display_fit_decimal._advance_scientific(1)
+	_expect_equal(
+		"fit decimal remains non-scrollable with separators",
+		"123,456,789,123,456.7",
+		display_fit_decimal.get_text(),
+	)
+
+	display_14_13 = _make_display(engine.evaluate("14^13"))
+	for _ in range(4):
+		display_14_13._advance_scientific(1)
+	for _ in range(4):
+		display_14_13._advance_scientific(-1)
+	_expect_equal(
+		"14^13 grouped initial display ignores repeated scroll attempts",
+		"793,714,773,254,144",
+		display_14_13.get_text(),
+	)
+
+	display_16_fact = _make_display(engine.evaluate("16!"))
+	for _ in range(4):
+		display_16_fact._advance_scientific(1)
+	for _ in range(4):
+		display_16_fact._advance_scientific(-1)
+	_expect_equal(
+		"16! grouped initial display ignores repeated scroll attempts",
+		"20,922,789,888,000",
+		display_16_fact.get_text(),
+	)
+
+	display_17_fact_sqrt = _make_display(engine.evaluate("17!+sqrt(2)"))
+	display_17_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"17!+sqrt(2) first shift keeps grouped decimal window",
+		"…55,687,428,096,001.41",
+		display_17_fact_sqrt.get_text(),
+	)
+	display_17_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"17!+sqrt(2) second shift keeps grouped decimal window",
+		"…5,687,428,096,001.414",
+		display_17_fact_sqrt.get_text(),
+	)
+	display_17_fact_sqrt._advance_scientific(-1)
+	_expect_equal(
+		"17!+sqrt(2) left shift restores previous grouped window",
+		"…55,687,428,096,001.41",
+		display_17_fact_sqrt.get_text(),
+	)
+
+	display_neg_16_fact_sqrt = _make_display(engine.evaluate("-16!-sqrt(3)"))
+	display_neg_16_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"-16!-sqrt(3) first shift keeps grouped decimal window",
+		"-…0,922,789,888,001.73",
+		display_neg_16_fact_sqrt.get_text(),
+	)
+	display_neg_16_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"-16!-sqrt(3) second shift keeps grouped decimal window",
+		"-…922,789,888,001.732",
+		display_neg_16_fact_sqrt.get_text(),
+	)
+	display_neg_16_fact_sqrt._advance_scientific(-1)
+	_expect_equal(
+		"-16!-sqrt(3) left shift restores previous grouped window",
+		"-…0,922,789,888,001.73",
+		display_neg_16_fact_sqrt.get_text(),
+	)
+
+	display_60_fact_sqrt = _make_display(engine.evaluate("60!+sqrt(8)"))
+	for _ in range(65):
+		display_60_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"60!+sqrt(8) late decimal bridge stays ungrouped",
+		"…09600000000000002",
+		display_60_fact_sqrt.get_text(),
+	)
+
+	display_101_fact = _make_display(engine.evaluate("101!"))
+	checks.append((
+		"101! initial scientific display has no thousands separators",
+		"," not in display_101_fact.get_text()
+		and display_101_fact.get_text() == "9.4259477598e+159",
+	))
+	display_fractional_power = _make_display(engine.evaluate("23.45^67.89"))
+	checks.append((
+		"23.45^67.89 initial scientific display has no thousands separators",
+		"," not in display_fractional_power.get_text()
+		and display_fractional_power.get_text() == "1.04471513460e+93",
+	))
+
+	failed = [name for name, ok in checks if not ok]
+	for name, ok in checks:
+		print(f"{name}: {'OK' if ok else 'FAIL'}")
+
+	print("\nExpected vs Actual:")
+	for label, expected, actual in expected_actual:
+		status = "OK" if expected == actual else "FAIL"
+		print(f"- {label}: {status}")
+		print(f"  expected: {expected}")
+		print(f"  actual:   {actual}")
+
+	if failed:
+		print("\nFAILED CHECKS:")
+		for name in failed:
+			print(f"- {name}")
+		raise SystemExit(1)
+
+	print("\nAll decimal separator regression checks passed.")
+
+
 def run_regressions() -> None:
 	original_visible_chars = ResultDisplay.VISIBLE_CHARS
+	original_decimal_separator = ResultDisplay.DECIMAL_SEPARATOR
 	try:
 		ResultDisplay.VISIBLE_CHARS = 17
+		ResultDisplay.DECIMAL_SEPARATOR = False
 		_run_width_17_regressions()
+		ResultDisplay.DECIMAL_SEPARATOR = True
+		_run_decimal_separator_regressions()
 	finally:
 		ResultDisplay.VISIBLE_CHARS = original_visible_chars
+		ResultDisplay.DECIMAL_SEPARATOR = original_decimal_separator
 
 
 if __name__ == "__main__":

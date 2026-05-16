@@ -6,9 +6,10 @@ gradual y lógica de representación científica desplazable.
 """
 
 import tkinter as tk
+import tkinter.font as tkfont
 import re
 
-from calculator_config_normalizations import get_visible_chars
+from calculator_config_normalizations import get_decimal_separator_enabled, get_visible_chars
 
 _CACHE_UNSET = object()
 
@@ -25,9 +26,10 @@ class ResultDisplay:
     DRAG_SCROLL_STEPS = 2   # caracteres máximos por tick de arrastre
     DRAG_SCROLL_INTERVAL = 20   # ms entre ticks de arrastre
     DRAG_MAX_PENDING_STEPS = 8  # pasos acumulados máximos para evitar saltos bruscos
-    PREFETCH_MARGIN = 30    # solicitar más precisión antes del final
-    SCI_FRACTION_WINDOW = 30    # dígitos de precisión que se muestran en modo científico antes de solicitar más
+    PREFETCH_MARGIN = 40    # solicitar más precisión antes del final
+    SCI_FRACTION_WINDOW = 40    # dígitos de precisión que se muestran en modo científico antes de solicitar más
     VISIBLE_CHARS = get_visible_chars()       # caracteres visibles en el campo de resultado. +1 auxiliar para el scroll
+    DECIMAL_SEPARATOR = get_decimal_separator_enabled()
     PLAIN_TAIL_LAST_EXPONENT = 4    # último exponente para mostrar cola fija sin exponente en modo desplazado
 
     _SCI_RE = re.compile(
@@ -40,9 +42,19 @@ class ResultDisplay:
     def __init__(self, parent, **kw):
         self._request_more_callback = kw.pop("request_more_callback", None)
         self._var = tk.StringVar(value="0")
+        self._base_font = kw.get("font")
+        self._separator_adjusted_font = None
         kw.setdefault("width", self.VISIBLE_CHARS + 1)
+        self._base_entry_width_chars = self._coerce_entry_width_chars(kw.get("width"))
         self._entry = tk.Entry(parent, textvariable=self._var,
                                state="readonly", **kw)
+        self._base_entry_pixel_width = self._entry.winfo_reqwidth()
+        if self._base_font is None:
+            try:
+                self._base_font = self._entry.cget("font")
+            except (AttributeError, tk.TclError):
+                self._base_font = None
+        self._entry_horizontal_padding = self._entry_padding_for_font(self._resolved_base_font())
         self._anim_id = None
         self._drag_anim_id = None
         self._last_drag_x = None
@@ -121,6 +133,7 @@ class ResultDisplay:
         self._sci_mode = False
         self._sci_source_kind = None
         left_index = self._entry.index("@0")
+        self._sync_font_for_text(text)
         self._var.set(text)
         if preserve_view:
             self._entry.after(10, lambda: self._restore_view(left_index))
@@ -219,7 +232,7 @@ class ResultDisplay:
         # Caso C: cola fija entera (…12338905, sin exponente ni punto)
         # content son los dígitos visibles; localizar su extremo derecho en
         # virtual_digits para no copiar más allá del último dígito visible.
-        visible = content  # dígitos mostrados (sin '…' ni signo)
+        visible = content.replace(",", "")  # dígitos mostrados (sin '…', signo ni comas)
         right_edge = len(virtual_digits)
         if visible:
             # Buscar la posición más a la derecha donde visible aparece como sufijo
@@ -327,7 +340,7 @@ class ResultDisplay:
         return f"{sign}{mantissa}e{exponent:+d}"
 
     def _parse_copy_text_as_standard_scientific(self, text: str):
-        stripped = text.strip()
+        stripped = text.strip().replace(",", "")
         if not stripped:
             return None
 
@@ -695,6 +708,7 @@ class ResultDisplay:
     def _render_scientific(self, precomputed_shift_text: tuple[int, str] | None = None):
         digits = self._sci_digits
         if not digits:
+            self._sync_font_for_text("0")
             self._var.set("0")
             return
 
@@ -726,12 +740,14 @@ class ResultDisplay:
         else:
             if self._dot_start_transition_active:
                 text = self._build_dot_start_transition_text()
+                self._sync_font_for_text(text)
                 self._var.set(text)
                 self._entry.after(0, self._scroll_to_start)
                 return
 
             if self._plain_decimal_exit_transition_active:
                 text, _ = self._build_shifted_scientific_text(shift)
+                self._sync_font_for_text(text)
                 self._var.set(text)
                 self._entry.after(0, self._scroll_to_start)
                 return
@@ -745,12 +761,14 @@ class ResultDisplay:
                 plain_decimal = self._build_plain_decimal_window_text(shift)
                 if plain_decimal is not None:
                     text = plain_decimal[0]
+                    self._sync_font_for_text(text)
                     self._var.set(text)
                     self._entry.after(0, self._scroll_to_start)
                     return
 
                 text = self._resolve_shifted_scientific_text(shift)
 
+        self._sync_font_for_text(text)
         self._var.set(text)
         if shift == 0:
             self._entry.after(0, self._scroll_to_start)
@@ -763,17 +781,17 @@ class ResultDisplay:
         plain_capacity = self._initial_plain_visible_capacity_chars()
         full_integer = self._build_initial_full_integer_text(plain_capacity)
         if full_integer is not None:
-            return full_integer
+            return self._format_initial_grouped_text(full_integer)
 
         plain_decimal = self._build_initial_plain_decimal_text(plain_capacity)
         if plain_decimal is not None:
-            return plain_decimal
+            return self._format_initial_grouped_text(plain_decimal)
 
         if self._sci_source_kind != "decimal":
             return text
 
         if len(text) <= capacity:
-            return text
+            return self._format_initial_grouped_text(text)
 
         compact_integer = self._build_initial_compact_integer_text(
             self._initial_scientific_visible_capacity_chars()
@@ -781,7 +799,232 @@ class ResultDisplay:
         if compact_integer is not None:
             return compact_integer
 
-        return text[:capacity]
+        visible_text = text[:capacity]
+        if self._decimal_source_integer_part_fits_initial_window(text, capacity):
+            return self._format_initial_grouped_text(visible_text)
+        return visible_text
+
+    def _format_initial_grouped_text(self, text: str) -> str:
+        if not self.DECIMAL_SEPARATOR:
+            return text
+
+        match = re.fullmatch(r"(?P<sign>[+-]?)(?P<int>\d+)(?P<frac>\.\d*)?", text)
+        if not match:
+            return text
+
+        integer = match.group("int")
+        if len(integer) <= 3:
+            return text
+
+        grouped = self._group_integer_part(integer)
+        return f"{match.group('sign')}{grouped}{match.group('frac') or ''}"
+
+    @staticmethod
+    def _group_integer_part(integer: str) -> str:
+        first_group_len = len(integer) % 3
+        groups = []
+        if first_group_len:
+            groups.append(integer[:first_group_len])
+        groups.extend(
+            integer[index : index + 3]
+            for index in range(first_group_len, len(integer), 3)
+        )
+        return ",".join(groups)
+
+    def _format_shifted_plain_decimal_core(
+        self,
+        core: str,
+        effective_shift: int,
+        decimal_index: int,
+    ) -> str:
+        if not self._should_group_shifted_plain_decimal_window() or decimal_index <= 3:
+            return core
+
+        if "." in core:
+            integer_part, fractional_part = core.split(".", 1)
+            grouped_integer = self._group_visible_integer_part(
+                integer_part,
+                effective_shift,
+                decimal_index,
+            )
+            return f"{grouped_integer}.{fractional_part}"
+
+        return self._group_visible_integer_part(core, effective_shift, decimal_index)
+
+    def _should_group_shifted_plain_decimal_window(self) -> bool:
+        if not self.DECIMAL_SEPARATOR:
+            return False
+        if self._is_exact_integer_scientific_value():
+            return False
+
+        capacity = self._initial_plain_visible_capacity_chars()
+        if self._build_initial_plain_decimal_text(capacity) is not None:
+            return True
+
+        return self._decimal_source_integer_part_fits_initial_window(
+            self._sci_initial_text,
+            capacity,
+        )
+
+    @staticmethod
+    def _group_visible_integer_part(integer: str, start_pos: int, decimal_index: int) -> str:
+        if len(integer) <= 3:
+            return integer
+
+        out = []
+        for offset, digit in enumerate(integer):
+            absolute_pos = start_pos + offset
+            if out and absolute_pos < decimal_index and (decimal_index - absolute_pos) % 3 == 0:
+                out.append(",")
+            out.append(digit)
+        return "".join(out)
+
+    def _decimal_source_integer_part_fits_initial_window(self, text: str, capacity: int) -> bool:
+        if self._sci_source_kind != "decimal":
+            return False
+
+        match = self._DEC_RE.fullmatch(text.strip())
+        if not match:
+            return False
+
+        int_part = match.group("int") if match.group("int") is not None else "0"
+        frac_part = match.group("frac")
+        if frac_part is None:
+            frac_part = match.group("only_frac") or ""
+        if not frac_part:
+            return False
+
+        return len(match.group("sign")) + len(int_part) < capacity
+
+    def refresh_font_adjustment(self):
+        self._refresh_base_entry_metrics()
+        self._sync_font_for_text(self._var.get())
+
+    def _sync_font_for_text(self, text: str):
+        if not self.DECIMAL_SEPARATOR or "," not in text:
+            self._restore_base_font()
+            return
+
+        base_font = self._resolved_base_font()
+        if base_font is None:
+            return
+
+        try:
+            base_size = int(base_font.cget("size"))
+        except (tk.TclError, ValueError):
+            return
+
+        if self._text_fits_entry_width(text, base_font, self._base_entry_width_chars):
+            self._restore_base_font()
+            return
+
+        adjusted = None
+        adjusted_width = self._base_entry_width_chars
+        min_abs_size = 6
+        for target_abs_size in range(abs(base_size) - 1, min_abs_size - 1, -1):
+            target_size = -target_abs_size if base_size < 0 else target_abs_size
+            candidate = tkfont.Font(root=self._entry, font=base_font)
+            candidate.configure(size=target_size)
+            max_width = self._max_entry_width_for_font(candidate)
+            for width in range(self._base_entry_width_chars, max_width + 1):
+                if self._text_fits_entry_width(text, candidate, width):
+                    adjusted = candidate
+                    adjusted_width = width
+                    break
+            if adjusted is not None:
+                break
+
+        if adjusted is None:
+            target_size = -min_abs_size if base_size < 0 else min_abs_size
+            adjusted = tkfont.Font(root=self._entry, font=base_font)
+            adjusted.configure(size=target_size)
+            adjusted_width = self._max_entry_width_for_font(adjusted)
+
+        try:
+            self._separator_adjusted_font = adjusted
+            self._entry.configure(font=adjusted, width=adjusted_width)
+        except (AttributeError, tk.TclError):
+            return
+
+    def _coerce_entry_width_chars(self, value) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return self.VISIBLE_CHARS + 1
+
+    def _entry_padding_for_font(self, font) -> int:
+        if font is None:
+            return 4
+
+        try:
+            padding = int(self._base_entry_pixel_width) - font.measure("0" * self._base_entry_width_chars)
+        except (TypeError, ValueError, tk.TclError):
+            return 4
+        return max(0, padding)
+
+    def _refresh_base_entry_metrics(self):
+        base_font = self._resolved_base_font()
+        if base_font is None:
+            return
+
+        try:
+            probe = tk.Entry(
+                self._entry.master,
+                font=base_font,
+                width=self._base_entry_width_chars,
+                relief=self._entry.cget("relief"),
+                bd=self._entry.cget("bd"),
+            )
+            requested_width = probe.winfo_reqwidth()
+            probe.destroy()
+            self._base_entry_pixel_width = requested_width
+            self._entry_horizontal_padding = max(
+                0,
+                requested_width - base_font.measure("0" * self._base_entry_width_chars),
+            )
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return
+
+    def _entry_pixel_width_for_font(self, font, width: int) -> int:
+        return font.measure("0" * width) + self._entry_horizontal_padding
+
+    def _max_entry_width_for_font(self, font) -> int:
+        width = self._base_entry_width_chars
+        while width < self._base_entry_width_chars * 3:
+            next_width = width + 1
+            if self._entry_pixel_width_for_font(font, next_width) > self._base_entry_pixel_width:
+                break
+            width = next_width
+        return width
+
+    def _text_fits_entry_width(self, text: str, font, width: int) -> bool:
+        if self._entry_pixel_width_for_font(font, width) > self._base_entry_pixel_width:
+            return False
+        available_text_width = max(1, self._entry_pixel_width_for_font(font, width) - self._entry_horizontal_padding)
+        return font.measure(text) <= available_text_width
+
+    def _resolved_base_font(self):
+        base_font = getattr(self, "_base_font", None)
+        if base_font is None:
+            return None
+        if isinstance(base_font, tkfont.Font):
+            return base_font
+        try:
+            return tkfont.Font(root=self._entry, font=base_font)
+        except (AttributeError, tk.TclError):
+            return None
+
+    def _restore_base_font(self):
+        if getattr(self, "_separator_adjusted_font", None) is None:
+            return
+
+        base_font = getattr(self, "_base_font", None)
+        if base_font is not None:
+            try:
+                self._entry.configure(font=base_font, width=self._base_entry_width_chars)
+            except (AttributeError, tk.TclError):
+                pass
+        self._separator_adjusted_font = None
 
     def _build_initial_full_integer_text(self, capacity: int) -> str | None:
         if not self._is_exact_integer_scientific_value():
@@ -1234,7 +1477,12 @@ class ResultDisplay:
             insert_at = min(max(0, dot_pos), len(chunk))
             core = f"{chunk[:insert_at]}.{chunk[insert_at:]}"
 
-        text = f"{sign}…{core}"
+        grouped_core = self._format_shifted_plain_decimal_core(
+            core,
+            effective_shift,
+            decimal_index,
+        )
+        text = f"{sign}…{grouped_core}"
         result = (text, len(core) >= body_width)
         self._plain_decimal_window_cache[shift] = result
         return result

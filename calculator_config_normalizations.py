@@ -18,3 +18,12 @@ def clamp_int(value: any, min_value: int, max_value: int) -> int:
 def get_visible_chars() -> int:
     """Obtiene el número de caracteres visibles configurado, limitándolo entre 17 y 32."""
     return clamp_int(get_config_value("VISIBLE_CHARS", 17), 17, 32)
+
+
+# ───────────────────────────────────────────────────────────────────
+# DECIMAL_SEPARATOR: habilita separadores de miles en la vista inicial.
+# ───────────────────────────────────────────────────────────────────
+
+def get_decimal_separator_enabled() -> bool:
+    """Indica si se muestran comas de miles en el resultado inicial."""
+    return clamp_int(get_config_value("DECIMAL_SEPARATOR", 0), 0, 1) == 1

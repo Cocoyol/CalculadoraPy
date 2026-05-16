@@ -515,11 +515,14 @@ def _run_width_30_regressions() -> None:
 
 def run_regressions() -> None:
     original_visible_chars = ResultDisplay.VISIBLE_CHARS
+    original_decimal_separator = ResultDisplay.DECIMAL_SEPARATOR
     try:
         ResultDisplay.VISIBLE_CHARS = VISIBLE_CHARS_UNDER_TEST
+        ResultDisplay.DECIMAL_SEPARATOR = False
         _run_width_30_regressions()
     finally:
         ResultDisplay.VISIBLE_CHARS = original_visible_chars
+        ResultDisplay.DECIMAL_SEPARATOR = original_decimal_separator
 
 
 def inspect_scroll_states(

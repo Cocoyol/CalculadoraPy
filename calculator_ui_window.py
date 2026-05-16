@@ -149,6 +149,7 @@ class CalculatorApp:
         # Fila del resultado + botón copiar
         row = tk.Frame(frame, bg=self.C["display_bg"])
         row.pack(fill="x", pady=(2, 4))
+        self._result_row = row
 
         self.result_display = ResultDisplay(
             row,
@@ -168,7 +169,25 @@ class CalculatorApp:
         self._copy_btn.bind("<Button-1>", self._on_copy_press)
         self._copy_btn.pack(side="right", padx=(6, 0))
 
-        self.result_display.widget.pack(side="right")
+        self.result_display.widget.pack(side="right", fill="y")
+        self._fix_result_row_height()
+
+    def _fix_result_row_height(self):
+        if not hasattr(self, "_result_row") or not hasattr(self, "_copy_btn"):
+            return
+
+        probe = tk.Entry(
+            self._result_row,
+            font=self._f_result,
+            relief="flat",
+            bd=0,
+        )
+        entry_height = probe.winfo_reqheight()
+        probe.destroy()
+
+        row_height = max(entry_height, self._copy_btn.winfo_reqheight())
+        self._result_row.configure(height=row_height)
+        self._result_row.pack_propagate(False)
 
     # ── Barra de toggles (RAD/DEG · INV) ────────────────────────
 
@@ -304,6 +323,8 @@ class CalculatorApp:
         for name, base in self._base_font_sizes.items():
             new_size = max(8, round(base * scale))
             getattr(self, f"_f_{name}").config(size=new_size)
+        self._fix_result_row_height()
+        self.result_display.refresh_font_adjustment()
 
     def _next_background_job_id(self) -> int:
         self._cancel_pending_background_jobs()
