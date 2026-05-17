@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from calculator_engine import CalculatorEngine
+from calculator_config_normalizations import get_decimal_separator_enabled, get_visible_chars
 from calculator_ui_results import ResultDisplay
 from calculator_ui_settings import open_settings_dialog
 
@@ -81,6 +82,7 @@ class CalculatorApp:
     # ────────────────────────────────────────────────────────────
 
     def __init__(self, root: tk.Tk, engine=None):
+        self._reload_result_display_config()
         self.root = root
         self.root.title("Calculadora Cient\u00EDfica")
         self.root.configure(bg=self.C["bg"])
@@ -179,14 +181,17 @@ class CalculatorApp:
         probe = tk.Entry(
             self._result_row,
             font=self._f_result,
+            width=getattr(self.result_display, "_base_entry_width_chars", ResultDisplay.VISIBLE_CHARS + 1),
             relief="flat",
             bd=0,
         )
         entry_height = probe.winfo_reqheight()
+        entry_width = probe.winfo_reqwidth()
         probe.destroy()
 
         row_height = max(entry_height, self._copy_btn.winfo_reqheight())
-        self._result_row.configure(height=row_height)
+        row_width = entry_width + self._copy_btn.winfo_reqwidth() + 6
+        self._result_row.configure(width=row_width, height=row_height)
         self._result_row.pack_propagate(False)
 
     # ── Barra de toggles (RAD/DEG · INV) ────────────────────────
@@ -472,6 +477,45 @@ class CalculatorApp:
 
     def _open_settings(self):
         open_settings_dialog(self)
+
+    def _reload_result_display_config(self):
+        ResultDisplay.VISIBLE_CHARS = get_visible_chars()
+        ResultDisplay.DECIMAL_SEPARATOR = get_decimal_separator_enabled()
+
+    def restart_ui_after_config_change(self):
+        if getattr(self, "_closing", False):
+            return
+
+        engine = self.engine
+        self._next_background_job_id()
+        self._clear_engine_precision_state()
+
+        try:
+            self.root.state("normal")
+        except tk.TclError:
+            pass
+
+        if getattr(self, "_resize_pending", None) is not None:
+            try:
+                self.root.after_cancel(self._resize_pending)
+            except tk.TclError:
+                pass
+            self._resize_pending = None
+
+        try:
+            self._background_executor.shutdown(wait=False, cancel_futures=True)
+        except (AttributeError, RuntimeError):
+            pass
+        self._background_futures = []
+
+        for child in self.root.winfo_children():
+            child.destroy()
+
+        self.__init__(self.root, engine=engine)
+        self.root.update_idletasks()
+        width = self.root.winfo_reqwidth()
+        height = self.root.winfo_reqheight()
+        self.root.geometry(f"{width}x{height}")
 
     # ── Cálculo en hilo separado ─────────────────────────────────
 
