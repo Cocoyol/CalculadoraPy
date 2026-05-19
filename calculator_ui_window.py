@@ -13,6 +13,7 @@ from calculator_engine import CalculatorEngine
 from calculator_config_normalizations import get_decimal_separator_enabled, get_visible_chars
 from calculator_ui_results import ResultDisplay
 from calculator_ui_settings import open_settings_dialog
+from calculator_ui_history import HistoryWindow
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -94,6 +95,8 @@ class CalculatorApp:
         self.engine = engine if engine is not None else CalculatorEngine()
         self._inv_mode = False
         self._last_engine_result: str | None = None
+        self._history: list[tuple[str, str]] = []
+        self._history_window: HistoryWindow | None = None
         self._shift_copy = False
         self._ctrl_copy = False
         self._background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="calculator")
@@ -110,8 +113,7 @@ class CalculatorApp:
         self._bind_keyboard()
 
         # Tamaño mínimo derivado del layout real: se adapta a VISIBLE_CHARS y tamaños de fuente
-        self.root.update_idletasks()
-        self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+        self._apply_minimum_window_geometry()
 
         # Foco inicial en el campo de expresión
         self.expr_entry.focus_set()
@@ -224,6 +226,14 @@ class CalculatorApp:
         )
         self._settings_btn.pack(side="right")
 
+        self._history_btn = tk.Button(
+            frame, text="Historial", font=self._f_small,
+            bg=self.C["toggle_off"], fg=self.C["special_fg"],
+            activebackground=self.C["special"], relief="flat",
+            cursor="hand2", command=self._open_history,
+        )
+        self._history_btn.pack(side="right", padx=(0, 4))
+
     # ── Panel de funciones científicas ───────────────────────────
 
     def _create_science_panel(self):
@@ -296,6 +306,7 @@ class CalculatorApp:
         self.expr_entry.bind("<Return>", lambda _e: self._calculate())
         self.expr_entry.bind("<KP_Enter>", lambda _e: self._calculate())
         self.root.bind("<Escape>", lambda _e: self._on_key("clear"))
+        self.root.bind("<F5>", lambda _e: self._open_history())
         # Permitir escritura libre en el campo de expresión
 
     # ── Redimensionamiento ────────────────────────────────────────
@@ -330,6 +341,13 @@ class CalculatorApp:
             getattr(self, f"_f_{name}").config(size=new_size)
         self._fix_result_row_height()
         self.result_display.refresh_font_adjustment()
+
+    def _apply_minimum_window_geometry(self):
+        self.root.update_idletasks()
+        width = self.root.winfo_reqwidth()
+        height = self.root.winfo_reqheight()
+        self.root.minsize(width, height)
+        self.root.geometry(f"{width}x{height}")
 
     def _next_background_job_id(self) -> int:
         self._cancel_pending_background_jobs()
@@ -478,6 +496,29 @@ class CalculatorApp:
     def _open_settings(self):
         open_settings_dialog(self)
 
+    # ── Historial ─────────────────────────────────────────────────
+
+    def _open_history(self):
+        if self._history_window is not None and self._history_window.is_open():
+            self._history_window.refresh()
+            self._history_window.lift()
+            return
+        self._history_window = HistoryWindow(
+            self.root,
+            self._history,
+            on_reuse=self._reuse_history_expr,
+        )
+
+    def _reuse_history_expr(self, expr: str):
+        self.expr_var.set(expr)
+        self.expr_entry.icursor(tk.END)
+        self.expr_entry.focus_set()
+
+    def _add_to_history(self, expr: str, result: str):
+        self._history.append((expr, result))
+        if self._history_window is not None and self._history_window.is_open():
+            self._history_window.refresh()
+
     def _reload_result_display_config(self):
         ResultDisplay.VISIBLE_CHARS = get_visible_chars()
         ResultDisplay.DECIMAL_SEPARATOR = get_decimal_separator_enabled()
@@ -487,6 +528,7 @@ class CalculatorApp:
             return
 
         engine = self.engine
+        history = list(getattr(self, "_history", []))
         self._next_background_job_id()
         self._clear_engine_precision_state()
 
@@ -512,10 +554,7 @@ class CalculatorApp:
             child.destroy()
 
         self.__init__(self.root, engine=engine)
-        self.root.update_idletasks()
-        width = self.root.winfo_reqwidth()
-        height = self.root.winfo_reqheight()
-        self.root.geometry(f"{width}x{height}")
+        self._history = history
 
     # ── Cálculo en hilo separado ─────────────────────────────────
 
@@ -535,6 +574,7 @@ class CalculatorApp:
                     self._last_engine_result = result
                     self.result_display.set_text(result)
                     self._sync_result_precision_availability()
+                    self._add_to_history(expr, result)
 
                 self._schedule_on_ui_thread(_apply_result, job_id=job_id)
             except (ValueError, ZeroDivisionError, OverflowError,
