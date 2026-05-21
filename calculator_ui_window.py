@@ -507,6 +507,7 @@ class CalculatorApp:
             self.root,
             self._history,
             on_reuse=self._reuse_history_expr,
+            on_calculate=self._calculate,
         )
 
     def _reuse_history_expr(self, expr: str):
@@ -515,7 +516,7 @@ class CalculatorApp:
         self.expr_entry.focus_set()
 
     def _add_to_history(self, expr: str, result: str):
-        self._history.append((expr, result))
+        self._history.append((expr.replace(" ", ""), result))
         if self._history_window is not None and self._history_window.is_open():
             self._history_window.refresh()
 
