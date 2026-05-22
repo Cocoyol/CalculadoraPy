@@ -516,7 +516,12 @@ class CalculatorApp:
         self.expr_entry.focus_set()
 
     def _add_to_history(self, expr: str, result: str):
-        self._history.append((expr.replace(" ", ""), result))
+        normalized_expr = expr.replace(" ", "")
+        self._history[:] = [
+            item for item in self._history
+            if item[0] != normalized_expr
+        ]
+        self._history.append((normalized_expr, result))
         if self._history_window is not None and self._history_window.is_open():
             self._history_window.refresh()
 

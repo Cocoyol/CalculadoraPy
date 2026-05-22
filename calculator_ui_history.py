@@ -111,6 +111,8 @@ class HistoryWindow:
             state="disabled",
             wrap="none",
             yscrollcommand=scrollbar.set,
+            width=50,
+            height=18,
         )
         self._text.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=self._text.yview)
