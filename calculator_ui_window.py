@@ -99,6 +99,7 @@ class CalculatorApp:
         self._history_window: HistoryWindow | None = None
         self._shift_copy = False
         self._ctrl_copy = False
+        self._expr_inactive_after_result = False
         self._background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="calculator")
         self._background_futures = []
         self._background_job_seq = 0
@@ -146,8 +147,11 @@ class CalculatorApp:
             frame, textvariable=self.expr_var,
             font=self._f_expr, bg=self.C["display_bg"],
             fg=self.C["expr_fg"], insertbackground=self.C["expr_fg"],
+            readonlybackground=self.C["display_bg"],
             relief="flat", justify="right", bd=0,
         )
+        self.expr_entry.bind("<Button-1>", self._on_expression_click)
+        self.expr_entry.bind("<Key>", self._on_inactive_result_key)
         self.expr_entry.pack(fill="x", pady=(4, 0))
 
         # Fila del resultado + botón copiar
@@ -307,7 +311,84 @@ class CalculatorApp:
         self.expr_entry.bind("<KP_Enter>", lambda _e: self._calculate())
         self.root.bind("<Escape>", lambda _e: self._on_key("clear"))
         self.root.bind("<F5>", lambda _e: self._open_history())
+        self.root.bind("<Key>", self._on_inactive_result_key, add="+")
         # Permitir escritura libre en el campo de expresión
+
+    def _expression_is_inactive(self) -> bool:
+        return getattr(self, "_expr_inactive_after_result", False)
+
+    def _set_expression_editable(self, editable: bool):
+        try:
+            self.expr_entry.configure(state="normal" if editable else "readonly")
+        except tk.TclError:
+            pass
+
+    def _focus_expression_if_editable(self):
+        if self._expression_is_inactive():
+            try:
+                self.root.focus_set()
+            except tk.TclError:
+                pass
+            return
+        self.expr_entry.focus_set()
+
+    def _deactivate_expression_after_result(self):
+        self._expr_inactive_after_result = True
+        self._set_expression_editable(False)
+        try:
+            self.expr_entry.selection_clear()
+        except tk.TclError:
+            pass
+        try:
+            self.root.focus_set()
+        except tk.TclError:
+            pass
+
+    def _activate_expression_for_editing(self):
+        if not self._expression_is_inactive():
+            return
+        self._expr_inactive_after_result = False
+        self._set_expression_editable(True)
+
+    def _reset_for_new_formula(self):
+        self._next_background_job_id()
+        self._clear_engine_precision_state()
+        self._activate_expression_for_editing()
+        self.expr_var.set("")
+        self.result_display.set_text("0")
+        self.result_display.finish_loading_more()
+        self.result_display.mark_precision_exhausted()
+        self._last_engine_result = None
+
+    def _begin_new_formula_from_inactive_result(self):
+        if self._expression_is_inactive():
+            self._reset_for_new_formula()
+
+    def _on_expression_click(self, _event):
+        self._activate_expression_for_editing()
+
+    def _on_inactive_result_key(self, event: tk.Event):
+        if not self._expression_is_inactive():
+            return None
+        if event.keysym in ("Escape", "Return", "KP_Enter", "Tab"):
+            return None
+        # Solo Ctrl: en Windows el bit 0x0008 es NumLock (no Alt), por lo que
+        # usar 0x000C bloqueaba la entrada con NumLock activado.
+        if getattr(event, "state", 0) & 0x0004:
+            return None
+        if event.keysym in ("BackSpace", "Delete"):
+            self._begin_new_formula_from_inactive_result()
+            self._focus_expression_if_editable()
+            return "break"
+
+        char = getattr(event, "char", "")
+        if not char or not char.isprintable() or char.isspace():
+            return None
+
+        self._begin_new_formula_from_inactive_result()
+        self._insert_at_cursor(char)
+        self._focus_expression_if_editable()
+        return "break"
 
     # ── Redimensionamiento ────────────────────────────────────────
 
@@ -430,14 +511,12 @@ class CalculatorApp:
 
     def _on_key(self, action: str):
         if action == "clear":
-            self._next_background_job_id()
-            self._clear_engine_precision_state()
-            self.expr_var.set("")
-            self.result_display.set_text("0")
-            self.result_display.finish_loading_more()
-            self.result_display.mark_precision_exhausted()
-            self._last_engine_result = None
+            self._reset_for_new_formula()
         elif action == "backspace":
+            if self._expression_is_inactive():
+                self._reset_for_new_formula()
+                self._focus_expression_if_editable()
+                return
             cur = self.expr_var.get()
             pos = self.expr_entry.index(tk.INSERT)
             if pos > 0:
@@ -446,18 +525,20 @@ class CalculatorApp:
         elif action == "equals":
             self._calculate()
         elif action.startswith("insert:"):
+            self._begin_new_formula_from_inactive_result()
             text = action[7:]
             self._insert_at_cursor(text)
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _on_science(self, col: int):
+        self._begin_new_formula_from_inactive_result()
         spec = self.SCIENCE_BUTTONS[col]
         if self._inv_mode:
             text_to_insert = spec[3]   # ins_inv
         else:
             text_to_insert = spec[1]   # ins_norm
         self._insert_at_cursor(text_to_insert)
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _insert_at_cursor(self, text: str):
         pos = self.expr_entry.index(tk.INSERT)
@@ -476,7 +557,7 @@ class CalculatorApp:
             self.engine.angle_mode = "rad"
             self.angle_btn.config(text="RAD", bg=self.C["toggle_on"],
                                   fg=self.C["bg"])
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _toggle_inv(self):
         self._inv_mode = not self._inv_mode
@@ -489,7 +570,7 @@ class CalculatorApp:
                                 fg=self.C["special_fg"])
             for col, spec in enumerate(self.SCIENCE_BUTTONS):
                 self._sci_buttons[col].config(text=spec[0])
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     # ── Diálogo de configuración ─────────────────────────────────
 
@@ -511,6 +592,7 @@ class CalculatorApp:
         )
 
     def _reuse_history_expr(self, expr: str):
+        self._activate_expression_for_editing()
         self.expr_var.set(expr)
         self.expr_entry.icursor(tk.END)
         self.expr_entry.focus_set()
@@ -581,6 +663,7 @@ class CalculatorApp:
                     self.result_display.set_text(result)
                     self._sync_result_precision_availability()
                     self._add_to_history(expr, result)
+                    self._deactivate_expression_after_result()
 
                 self._schedule_on_ui_thread(_apply_result, job_id=job_id)
             except (ValueError, ZeroDivisionError, OverflowError,
@@ -615,7 +698,7 @@ class CalculatorApp:
         )
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _request_more_precision(self):
         if not self._engine_can_expand_precision():
