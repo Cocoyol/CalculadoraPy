@@ -23,24 +23,29 @@ from calculator_ui_history import HistoryWindow
 class CalculatorApp:
     """Ventana principal de la calculadora científica."""
 
-    # ── Paleta de colores ────────────────────────────────────────
+    # ── Paleta de colores (Nord) ──────────────────────────────────
+    # Polar Night: #2E3440 #3B4252 #434C5E #4C566A
+    # Snow Storm:  #D8DEE9 #E5E9F0 #ECEFF4
+    # Frost:       #8FBCBB #88C0D0 #81A1C1 #5E81AC
+    # Aurora:      #BF616A #D08770 #EBCB8B #A3BE8C #B48EAD
     C = {
-        "bg":         "#1E1E2E",
-        "display_bg": "#181825",
-        "num":        "#313244",
-        "num_fg":     "#CDD6F4",
-        "op":         "#F38BA8",
-        "op_fg":      "#1E1E2E",
-        "func":       "#45475A",
-        "func_fg":    "#CDD6F4",
-        "special":    "#585B70",
-        "special_fg": "#CDD6F4",
-        "equals":     "#89B4FA",
-        "equals_fg":  "#1E1E2E",
-        "toggle_on":  "#A6E3A1",
-        "toggle_off": "#585B70",
-        "expr_fg":    "#BAC2DE",
-        "result_fg":  "#A6E3A1",
+        "bg":         "#2E3440",   # Polar Night 1  – fondo general
+        "display_bg": "#242933",   # más oscuro para la pantalla
+        "num":        "#3B4252",   # Polar Night 2  – dígitos (oscuro)
+        "num_fg":     "#ECEFF4",   # Snow Storm 3
+        "op":         "#D08770",   # Aurora Orange  – operadores básicos
+        "op_fg":      "#2E3440",
+        "func":       "#4C566A",   # Polar Night 4  – funciones (más claro que num)
+        "func_fg":    "#ECEFF4",
+        "special":    "#BF616A",   # Aurora Red     – AC / borrar (destructivo)
+        "special_fg": "#ECEFF4",
+        "equals":     "#A3BE8C",   # Aurora Green   – igual (confirmar)
+        "equals_fg":  "#2E3440",
+        "toggle_on":  "#88C0D0",   # Frost          – modo activo
+        "toggle_off": "#434C5E",   # Polar Night 3  – modo inactivo
+        "active":     "#cdb5cd",   # Aurora Pink    – fondo botón activo (hover o toggle on)
+        "expr_fg":    "#D8DEE9",   # Snow Storm 1
+        "result_fg":  "#88C0D0",   # Frost          – resultado
     }
 
     # ── Definiciones de botones científicos ──────────────────────
@@ -128,12 +133,12 @@ class CalculatorApp:
     # ── Fuentes ──────────────────────────────────────────────────
 
     def _init_fonts(self):
-        self._f_expr   = tkfont.Font(family="Consolas", size=16)
-        self._f_result = tkfont.Font(family="Consolas", size=22, weight="bold")
-        self._f_btn    = tkfont.Font(family="Segoe UI", size=15)
-        self._f_func   = tkfont.Font(family="Segoe UI", size=12)
-        self._f_small  = tkfont.Font(family="Segoe UI", size=11)
-        self._base_font_sizes = {"expr": 16, "result": 22, "btn": 15, "func": 12, "small": 11}
+        self._f_expr   = tkfont.Font(family="Consolas", size=19)
+        self._f_result = tkfont.Font(family="Consolas", size=25, weight="bold")
+        self._f_btn    = tkfont.Font(family="Segoe UI", size=18)
+        self._f_func   = tkfont.Font(family="Segoe UI", size=14)
+        self._f_small  = tkfont.Font(family="Segoe UI", size=12)
+        self._base_font_sizes = {"expr": 19, "result": 25, "btn": 18, "func": 14, "small": 12}
 
     # ── Pantalla ─────────────────────────────────────────────────
 
@@ -171,7 +176,7 @@ class CalculatorApp:
         self._copy_btn = tk.Button(
             row, text="Copiar", font=self._f_small,
             bg=self.C["func"], fg=self.C["func_fg"],
-            activebackground=self.C["special"], relief="flat",
+            activebackground=self.C["active"], relief="flat",
             cursor="hand2", command=self._copy_result, padx=8,
         )
         self._copy_btn.bind("<Button-1>", self._on_copy_press)
@@ -224,8 +229,8 @@ class CalculatorApp:
 
         self._settings_btn = tk.Button(
             frame, text="\u2699", font=self._f_small,
-            bg=self.C["toggle_off"], fg="#F9E2AF",
-            activebackground=self.C["special"], relief="flat",
+            bg=self.C["toggle_off"], fg="#EBCB8B",
+            activebackground=self.C["active"], relief="flat",
             cursor="hand2", command=self._open_settings,
         )
         self._settings_btn.pack(side="right")
@@ -233,7 +238,7 @@ class CalculatorApp:
         self._history_btn = tk.Button(
             frame, text="Historial", font=self._f_small,
             bg=self.C["toggle_off"], fg=self.C["special_fg"],
-            activebackground=self.C["special"], relief="flat",
+            activebackground=self.C["active"], relief="flat",
             cursor="hand2", command=self._open_history,
         )
         self._history_btn.pack(side="right", padx=(0, 4))
@@ -253,11 +258,11 @@ class CalculatorApp:
             btn = tk.Button(
                 frame, text=text_norm, font=self._f_func,
                 bg=self.C["func"], fg=self.C["func_fg"],
-                activebackground=self.C["special"], relief="flat",
+                activebackground=self.C["active"], relief="flat",
                 command=lambda c=col: self._on_science(c),
             )
-            btn.grid(row=0, column=col, sticky="nsew", padx=2, pady=2,
-                     ipady=6)
+            btn.grid(row=0, column=col, sticky="nsew", padx=1, pady=1,
+                     ipady=0)
             self._sci_buttons.append(btn)
 
     # ── Teclado numérico / operadores ────────────────────────────
@@ -284,12 +289,12 @@ class CalculatorApp:
                 fg = self.C[f"{kind}_fg"]
                 btn = tk.Button(
                     frame, text=text, font=self._f_btn,
-                    bg=bg, fg=fg, activebackground=self.C["special"],
+                    bg=bg, fg=fg, activebackground=self.C["active"],
                     relief="flat",
                     command=lambda a=action: self._on_key(a),
                 )
                 btn.grid(row=r, column=col_pos, columnspan=spans[idx],
-                         sticky="nsew", padx=2, pady=2, ipady=8)
+                         sticky="nsew", padx=1, pady=1, ipady=0)
                 col_pos += spans[idx]
 
         for r in range(len(self.KEYPAD)):
@@ -545,6 +550,7 @@ class CalculatorApp:
         cur = self.expr_var.get()
         self.expr_var.set(cur[:pos] + text + cur[pos:])
         self.expr_entry.icursor(pos + len(text))
+        self.expr_entry.xview(tk.INSERT)
 
     # ── Toggles ──────────────────────────────────────────────────
 

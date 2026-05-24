@@ -41,6 +41,7 @@ class _FakeExprEntry:
         self.state = "normal"
         self.focus_calls = 0
         self.cursor = 0
+        self.xview_calls = []
         self.selection_clear_calls = 0
 
     def focus_set(self):
@@ -52,6 +53,10 @@ class _FakeExprEntry:
 
     def icursor(self, pos):
         self.cursor = pos
+        return None
+
+    def xview(self, *args):
+        self.xview_calls.append(args)
         return None
 
     def configure(self, **kw):
@@ -277,6 +282,19 @@ def check_physical_key_after_result_starts_new_formula() -> None:
     _assert(not harness._expr_inactive_after_result, "la fórmula nueva no debe quedar inactiva")
 
 
+def check_button_insert_keeps_cursor_visible() -> None:
+    harness = _Harness(ArbitraryPrecisionCalculatorEngine())
+    expression = "12312312312312312312312312312312"
+    harness.expr_var.set(expression)
+    harness.expr_entry.cursor = len(expression)
+
+    CalculatorApp._insert_at_cursor(harness, "3")
+
+    _assert(harness.expr_var.get() == expression + "3", "el botón no insertó el carácter al final")
+    _assert(harness.expr_entry.cursor == len(expression) + 1, "el cursor no quedó tras el carácter insertado")
+    _assert(harness.expr_entry.xview_calls[-1] == ("insert",), "el input no desplazó la vista hacia el cursor")
+
+
 def check_calculate_error_marks_precision_exhausted() -> None:
     harness = _Harness(ArbitraryPrecisionCalculatorEngine())
     harness.engine.evaluate("1/3")
@@ -320,6 +338,7 @@ def run_regressions() -> None:
         ("successful calculation deactivates expression", check_successful_calculation_deactivates_expression),
         ("next button after result starts new formula", check_next_button_after_result_starts_new_formula),
         ("physical key after result starts new formula", check_physical_key_after_result_starts_new_formula),
+        ("button insert keeps cursor visible", check_button_insert_keeps_cursor_visible),
         ("calculate error marks precision exhausted", check_calculate_error_marks_precision_exhausted),
         ("precision failure marks exhausted", check_request_more_precision_failure_marks_exhausted),
         ("stale precision job keeps loading", check_stale_job_does_not_clear_loading),
