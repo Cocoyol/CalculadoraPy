@@ -88,6 +88,37 @@ def check_terminal_values_do_not_expand_precision() -> None:
     _assert(not engine.can_expand_precision(), "NaN no debe expandir precisión")
 
 
+def check_large_mpf_values_keep_expanding_precision() -> None:
+    integer_like = ArbitraryPrecisionCalculatorEngine(initial_digits=120, precision_step=120)
+    first = integer_like.evaluate("120!+20^30")
+
+    _assert(
+        integer_like.can_expand_precision(),
+        "un entero mpf truncado debe permitir pedir mas digitos",
+    )
+    second = integer_like.request_more_precision()
+    _assert(second != first, "la expansion del entero grande no cambio el texto")
+    _assert(len(second) > len(first), "la expansion del entero grande no agrego digitos")
+    _assert(
+        not integer_like.can_expand_precision(),
+        "el entero grande completo debe quedar terminal tras cubrir sus digitos",
+    )
+
+    non_integer = ArbitraryPrecisionCalculatorEngine(initial_digits=120, precision_step=120)
+    first = non_integer.evaluate("121.7^147.9")
+
+    _assert(
+        non_integer.can_expand_precision(),
+        "un mpf enorme no debe bloquearse solo porque parece entero a baja precision",
+    )
+    second = non_integer.request_more_precision()
+    third = non_integer.request_more_precision()
+
+    _assert(second != first, "la primera expansion no agrego digitos")
+    _assert(third != second, "la segunda expansion no agrego digitos")
+    _assert(non_integer.can_expand_precision(), "el mpf no entero debe seguir expandiendo")
+
+
 def check_new_job_id_cancels_pending_futures() -> None:
     running = _FakeFuture(running=True)
     pending = _FakeFuture()
@@ -124,6 +155,7 @@ def check_submit_background_tracks_latest_future() -> None:
 def run_regressions() -> None:
     checks = [
         ("terminal values block precision expansion", check_terminal_values_do_not_expand_precision),
+        ("large mpf values keep precision expansion", check_large_mpf_values_keep_expanding_precision),
         ("new job id cancels queued futures", check_new_job_id_cancels_pending_futures),
         ("submit background tracks latest future", check_submit_background_tracks_latest_future),
     ]

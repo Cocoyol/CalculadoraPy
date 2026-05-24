@@ -13,8 +13,6 @@ AP_PRECISION_STEP = 120
 
 def main():
     root = tk.Tk()
-    root.geometry("420x620")
-    root.minsize(380, 580)
     if USE_ARBITRARY_PRECISION:
         from arbitrary_precision_engine import ArbitraryPrecisionCalculatorEngine
 

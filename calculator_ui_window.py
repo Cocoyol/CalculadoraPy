@@ -10,8 +10,10 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from calculator_engine import CalculatorEngine
+from calculator_config_normalizations import get_decimal_separator_enabled, get_visible_chars
 from calculator_ui_results import ResultDisplay
 from calculator_ui_settings import open_settings_dialog
+from calculator_ui_history import HistoryWindow
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -81,6 +83,7 @@ class CalculatorApp:
     # ────────────────────────────────────────────────────────────
 
     def __init__(self, root: tk.Tk, engine=None):
+        self._reload_result_display_config()
         self.root = root
         self.root.title("Calculadora Cient\u00EDfica")
         self.root.configure(bg=self.C["bg"])
@@ -92,8 +95,11 @@ class CalculatorApp:
         self.engine = engine if engine is not None else CalculatorEngine()
         self._inv_mode = False
         self._last_engine_result: str | None = None
+        self._history: list[tuple[str, str]] = []
+        self._history_window: HistoryWindow | None = None
         self._shift_copy = False
         self._ctrl_copy = False
+        self._expr_inactive_after_result = False
         self._background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="calculator")
         self._background_futures = []
         self._background_job_seq = 0
@@ -108,8 +114,7 @@ class CalculatorApp:
         self._bind_keyboard()
 
         # Tamaño mínimo derivado del layout real: se adapta a VISIBLE_CHARS y tamaños de fuente
-        self.root.update_idletasks()
-        self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+        self._apply_minimum_window_geometry()
 
         # Foco inicial en el campo de expresión
         self.expr_entry.focus_set()
@@ -142,13 +147,17 @@ class CalculatorApp:
             frame, textvariable=self.expr_var,
             font=self._f_expr, bg=self.C["display_bg"],
             fg=self.C["expr_fg"], insertbackground=self.C["expr_fg"],
+            readonlybackground=self.C["display_bg"],
             relief="flat", justify="right", bd=0,
         )
+        self.expr_entry.bind("<Button-1>", self._on_expression_click)
+        self.expr_entry.bind("<Key>", self._on_inactive_result_key)
         self.expr_entry.pack(fill="x", pady=(4, 0))
 
         # Fila del resultado + botón copiar
         row = tk.Frame(frame, bg=self.C["display_bg"])
         row.pack(fill="x", pady=(2, 4))
+        self._result_row = row
 
         self.result_display = ResultDisplay(
             row,
@@ -168,7 +177,28 @@ class CalculatorApp:
         self._copy_btn.bind("<Button-1>", self._on_copy_press)
         self._copy_btn.pack(side="right", padx=(6, 0))
 
-        self.result_display.widget.pack(side="right")
+        self.result_display.widget.pack(side="right", fill="y")
+        self._fix_result_row_height()
+
+    def _fix_result_row_height(self):
+        if not hasattr(self, "_result_row") or not hasattr(self, "_copy_btn"):
+            return
+
+        probe = tk.Entry(
+            self._result_row,
+            font=self._f_result,
+            width=getattr(self.result_display, "_base_entry_width_chars", ResultDisplay.VISIBLE_CHARS + 1),
+            relief="flat",
+            bd=0,
+        )
+        entry_height = probe.winfo_reqheight()
+        entry_width = probe.winfo_reqwidth()
+        probe.destroy()
+
+        row_height = max(entry_height, self._copy_btn.winfo_reqheight())
+        row_width = entry_width + self._copy_btn.winfo_reqwidth() + 6
+        self._result_row.configure(width=row_width, height=row_height)
+        self._result_row.pack_propagate(False)
 
     # ── Barra de toggles (RAD/DEG · INV) ────────────────────────
 
@@ -199,6 +229,14 @@ class CalculatorApp:
             cursor="hand2", command=self._open_settings,
         )
         self._settings_btn.pack(side="right")
+
+        self._history_btn = tk.Button(
+            frame, text="Historial", font=self._f_small,
+            bg=self.C["toggle_off"], fg=self.C["special_fg"],
+            activebackground=self.C["special"], relief="flat",
+            cursor="hand2", command=self._open_history,
+        )
+        self._history_btn.pack(side="right", padx=(0, 4))
 
     # ── Panel de funciones científicas ───────────────────────────
 
@@ -272,7 +310,85 @@ class CalculatorApp:
         self.expr_entry.bind("<Return>", lambda _e: self._calculate())
         self.expr_entry.bind("<KP_Enter>", lambda _e: self._calculate())
         self.root.bind("<Escape>", lambda _e: self._on_key("clear"))
+        self.root.bind("<F5>", lambda _e: self._open_history())
+        self.root.bind("<Key>", self._on_inactive_result_key, add="+")
         # Permitir escritura libre en el campo de expresión
+
+    def _expression_is_inactive(self) -> bool:
+        return getattr(self, "_expr_inactive_after_result", False)
+
+    def _set_expression_editable(self, editable: bool):
+        try:
+            self.expr_entry.configure(state="normal" if editable else "readonly")
+        except tk.TclError:
+            pass
+
+    def _focus_expression_if_editable(self):
+        if self._expression_is_inactive():
+            try:
+                self.root.focus_set()
+            except tk.TclError:
+                pass
+            return
+        self.expr_entry.focus_set()
+
+    def _deactivate_expression_after_result(self):
+        self._expr_inactive_after_result = True
+        self._set_expression_editable(False)
+        try:
+            self.expr_entry.selection_clear()
+        except tk.TclError:
+            pass
+        try:
+            self.root.focus_set()
+        except tk.TclError:
+            pass
+
+    def _activate_expression_for_editing(self):
+        if not self._expression_is_inactive():
+            return
+        self._expr_inactive_after_result = False
+        self._set_expression_editable(True)
+
+    def _reset_for_new_formula(self):
+        self._next_background_job_id()
+        self._clear_engine_precision_state()
+        self._activate_expression_for_editing()
+        self.expr_var.set("")
+        self.result_display.set_text("0")
+        self.result_display.finish_loading_more()
+        self.result_display.mark_precision_exhausted()
+        self._last_engine_result = None
+
+    def _begin_new_formula_from_inactive_result(self):
+        if self._expression_is_inactive():
+            self._reset_for_new_formula()
+
+    def _on_expression_click(self, _event):
+        self._activate_expression_for_editing()
+
+    def _on_inactive_result_key(self, event: tk.Event):
+        if not self._expression_is_inactive():
+            return None
+        if event.keysym in ("Escape", "Return", "KP_Enter", "Tab"):
+            return None
+        # Solo Ctrl: en Windows el bit 0x0008 es NumLock (no Alt), por lo que
+        # usar 0x000C bloqueaba la entrada con NumLock activado.
+        if getattr(event, "state", 0) & 0x0004:
+            return None
+        if event.keysym in ("BackSpace", "Delete"):
+            self._begin_new_formula_from_inactive_result()
+            self._focus_expression_if_editable()
+            return "break"
+
+        char = getattr(event, "char", "")
+        if not char or not char.isprintable() or char.isspace():
+            return None
+
+        self._begin_new_formula_from_inactive_result()
+        self._insert_at_cursor(char)
+        self._focus_expression_if_editable()
+        return "break"
 
     # ── Redimensionamiento ────────────────────────────────────────
 
@@ -304,6 +420,15 @@ class CalculatorApp:
         for name, base in self._base_font_sizes.items():
             new_size = max(8, round(base * scale))
             getattr(self, f"_f_{name}").config(size=new_size)
+        self._fix_result_row_height()
+        self.result_display.refresh_font_adjustment()
+
+    def _apply_minimum_window_geometry(self):
+        self.root.update_idletasks()
+        width = self.root.winfo_reqwidth()
+        height = self.root.winfo_reqheight()
+        self.root.minsize(width, height)
+        self.root.geometry(f"{width}x{height}")
 
     def _next_background_job_id(self) -> int:
         self._cancel_pending_background_jobs()
@@ -386,14 +511,12 @@ class CalculatorApp:
 
     def _on_key(self, action: str):
         if action == "clear":
-            self._next_background_job_id()
-            self._clear_engine_precision_state()
-            self.expr_var.set("")
-            self.result_display.set_text("0")
-            self.result_display.finish_loading_more()
-            self.result_display.mark_precision_exhausted()
-            self._last_engine_result = None
+            self._reset_for_new_formula()
         elif action == "backspace":
+            if self._expression_is_inactive():
+                self._reset_for_new_formula()
+                self._focus_expression_if_editable()
+                return
             cur = self.expr_var.get()
             pos = self.expr_entry.index(tk.INSERT)
             if pos > 0:
@@ -402,18 +525,20 @@ class CalculatorApp:
         elif action == "equals":
             self._calculate()
         elif action.startswith("insert:"):
+            self._begin_new_formula_from_inactive_result()
             text = action[7:]
             self._insert_at_cursor(text)
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _on_science(self, col: int):
+        self._begin_new_formula_from_inactive_result()
         spec = self.SCIENCE_BUTTONS[col]
         if self._inv_mode:
             text_to_insert = spec[3]   # ins_inv
         else:
             text_to_insert = spec[1]   # ins_norm
         self._insert_at_cursor(text_to_insert)
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _insert_at_cursor(self, text: str):
         pos = self.expr_entry.index(tk.INSERT)
@@ -432,7 +557,7 @@ class CalculatorApp:
             self.engine.angle_mode = "rad"
             self.angle_btn.config(text="RAD", bg=self.C["toggle_on"],
                                   fg=self.C["bg"])
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _toggle_inv(self):
         self._inv_mode = not self._inv_mode
@@ -445,12 +570,79 @@ class CalculatorApp:
                                 fg=self.C["special_fg"])
             for col, spec in enumerate(self.SCIENCE_BUTTONS):
                 self._sci_buttons[col].config(text=spec[0])
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     # ── Diálogo de configuración ─────────────────────────────────
 
     def _open_settings(self):
         open_settings_dialog(self)
+
+    # ── Historial ─────────────────────────────────────────────────
+
+    def _open_history(self):
+        if self._history_window is not None and self._history_window.is_open():
+            self._history_window.refresh()
+            self._history_window.lift()
+            return
+        self._history_window = HistoryWindow(
+            self.root,
+            self._history,
+            on_reuse=self._reuse_history_expr,
+            on_calculate=self._calculate,
+        )
+
+    def _reuse_history_expr(self, expr: str):
+        self._activate_expression_for_editing()
+        self.expr_var.set(expr)
+        self.expr_entry.icursor(tk.END)
+        self.expr_entry.focus_set()
+
+    def _add_to_history(self, expr: str, result: str):
+        normalized_expr = expr.replace(" ", "")
+        self._history[:] = [
+            item for item in self._history
+            if item[0] != normalized_expr
+        ]
+        self._history.append((normalized_expr, result))
+        if self._history_window is not None and self._history_window.is_open():
+            self._history_window.refresh()
+
+    def _reload_result_display_config(self):
+        ResultDisplay.VISIBLE_CHARS = get_visible_chars()
+        ResultDisplay.DECIMAL_SEPARATOR = get_decimal_separator_enabled()
+
+    def restart_ui_after_config_change(self):
+        if getattr(self, "_closing", False):
+            return
+
+        engine = self.engine
+        history = list(getattr(self, "_history", []))
+        self._next_background_job_id()
+        self._clear_engine_precision_state()
+
+        try:
+            self.root.state("normal")
+        except tk.TclError:
+            pass
+
+        if getattr(self, "_resize_pending", None) is not None:
+            try:
+                self.root.after_cancel(self._resize_pending)
+            except tk.TclError:
+                pass
+            self._resize_pending = None
+
+        try:
+            self._background_executor.shutdown(wait=False, cancel_futures=True)
+        except (AttributeError, RuntimeError):
+            pass
+        self._background_futures = []
+
+        for child in self.root.winfo_children():
+            child.destroy()
+
+        self.__init__(self.root, engine=engine)
+        self._history = history
 
     # ── Cálculo en hilo separado ─────────────────────────────────
 
@@ -470,6 +662,8 @@ class CalculatorApp:
                     self._last_engine_result = result
                     self.result_display.set_text(result)
                     self._sync_result_precision_availability()
+                    self._add_to_history(expr, result)
+                    self._deactivate_expression_after_result()
 
                 self._schedule_on_ui_thread(_apply_result, job_id=job_id)
             except (ValueError, ZeroDivisionError, OverflowError,
@@ -504,7 +698,7 @@ class CalculatorApp:
         )
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self.expr_entry.focus_set()
+        self._focus_expression_if_editable()
 
     def _request_more_precision(self):
         if not self._engine_can_expand_precision():

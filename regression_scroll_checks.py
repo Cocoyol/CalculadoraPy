@@ -116,7 +116,7 @@ def inspect_scroll_states(
 	print(f"final text:     {end_text}")
 
 
-def run_regressions() -> None:
+def _run_width_17_regressions() -> None:
 	checks: list[tuple[str, bool]] = []
 	expected_actual: list[tuple[str, str, str]] = []
 
@@ -186,6 +186,102 @@ def run_regressions() -> None:
 	second = display.get_text()
 	checks.append(("1/3 initial visible width is 17", len(first) == 17))
 	checks.append(("1/3 after first scroll keeps 17 without ellipsis", len(second.replace("…", "")) == 17))
+
+	_, end_complete_dot_start, states_complete_dot_start = _walk(
+		"0.33333333333333+0.0000000000000045",
+		steps=20,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"complete dot-start decimal stops at width 17",
+		"….3333333333333345",
+		end_complete_dot_start,
+	))
+	checks.append((
+		"complete dot-start decimal avoids scientific bridge at width 17",
+		end_complete_dot_start == "….3333333333333345"
+		and states_complete_dot_start == ["….3333333333333345"],
+	))
+	_, end_small_positive, states_small_positive = _walk(
+		"123456/1e16",
+		steps=5,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"small positive decimal completes after initial truncation",
+		"….0000000000123456",
+		end_small_positive,
+	))
+	checks.append((
+		"small positive decimal does not enter scientific bridge after completion",
+		states_small_positive == ["….0000000000123456"],
+	))
+
+	display_small_negative = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=80,
+		precision_step=120,
+	).evaluate("-123456/1e16"))
+	small_negative_initial = display_small_negative.get_text()
+	display_small_negative._advance_scientific(1)
+	small_negative_first = display_small_negative.get_text()
+	display_small_negative._advance_scientific(1)
+	small_negative_second = display_small_negative.get_text()
+	display_small_negative._advance_scientific(1)
+	expected_actual.append((
+		"small negative decimal first shifted view",
+		"-….000000000012345",
+		small_negative_first,
+	))
+	expected_actual.append((
+		"small negative decimal enters scientific bridge after dot-start",
+		"-1.23456e-11",
+		small_negative_second,
+	))
+	checks.append((
+		"small negative decimal uses scientific bridge when point would be misleading",
+		small_negative_initial == "-0.00000000001234"
+		and small_negative_first == "-….000000000012345"
+		and small_negative_second == "-1.23456e-11"
+		and display_small_negative.get_text() == small_negative_second,
+	))
+	checks.append((
+		"small negative decimal bridge copy stays scientific",
+		display_small_negative.get_copy_text() == "-1.23456e-11",
+	))
+
+	_, end_bridge_exit, states_bridge_exit = _walk(
+		"1234567890124/1e23",
+		steps=8,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"small decimal exits bridge to terminal shifted scientific",
+		"…234567890124e-23",
+		end_bridge_exit,
+	))
+	checks.append((
+		"small decimal bridge exit keeps terminal shifted scientific state",
+		states_bridge_exit == [
+			"….0000000000123456",
+			"1.23456789012e-11",
+			"…234567890124e-23",
+		],
+	))
+
+	_, end_initial_bridge_complete, states_initial_bridge_complete = _walk(
+		"1234567890123/1e24",
+		steps=8,
+		initial_digits=80,
+	)
+	expected_actual.append((
+		"complete initial scientific bridge stops instead of oscillating",
+		"….234567890123e-12",
+		end_initial_bridge_complete,
+	))
+	checks.append((
+		"complete initial scientific bridge does not oscillate back to initial view",
+		states_initial_bridge_complete == ["….234567890123e-12"],
+	))
 
 	engine_3e30 = ArbitraryPrecisionCalculatorEngine(initial_digits=18, precision_step=120)
 	value_3e30 = engine_3e30.evaluate("3*10^-30")
@@ -379,9 +475,23 @@ def run_regressions() -> None:
 
 	engine_complex = ArbitraryPrecisionCalculatorEngine(initial_digits=120, precision_step=120)
 	complex_value = engine_complex.evaluate("asin(3)")
+	display_complex = _make_display(complex_value)
+	expected_actual.append((
+		"asin(3) complex display precision",
+		"(1.5707963 - 1.7627472j)",
+		complex_value,
+	))
+	expected_actual.append((
+		"asin(3) complex copy precision",
+		"(1.5707963 - 1.7627472j)",
+		display_complex.get_copy_text(),
+	))
 	checks.append((
-		"complex result uses initial precision only",
-		"j)" in complex_value and not engine_complex.can_expand_precision(),
+		"complex result displays and copies at 8-digit precision",
+		complex_value == "(1.5707963 - 1.7627472j)"
+		and display_complex.get_text() == complex_value
+		and display_complex.get_copy_text() == complex_value
+		and not engine_complex.can_expand_precision(),
 	))
 	try:
 		engine_complex.request_more_precision()
@@ -573,7 +683,7 @@ def run_regressions() -> None:
 		not any(re.fullmatch(r"[+-]?\d(?:\.\d+)?e-1", text) for text in states_20_20),
 	))
 
-	# Números negativos: el cálculo inicial muestra signo + 17 dígitos (18 chars)
+	# Números negativos decimales: el cálculo inicial incluye el signo en VISIBLE_CHARS.
 	display_neg_dec = _make_display(ArbitraryPrecisionCalculatorEngine(
 		initial_digits=260,
 		precision_step=120,
@@ -581,18 +691,78 @@ def run_regressions() -> None:
 	neg_dec_initial = display_neg_dec.get_text()
 	expected_actual.append((
 		"-23/27 initial display",
-		"-0.851851851851851",
+		"-0.85185185185185",
 		neg_dec_initial,
 	))
 	checks.append((
-		"-23/27 initial has sign + 17 digits (18 chars)",
-		len(neg_dec_initial) == 18 and neg_dec_initial.startswith("-"),
+		"-23/27 initial has 17 chars including sign",
+		len(neg_dec_initial) == 17 and neg_dec_initial.startswith("-"),
 	))
-	# Al desplazar a la derecha se restaura a 17 chars de cuerpo
+	display_neg_9999_77 = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("0-9999/77"))
+	neg_9999_77_initial = display_neg_9999_77.get_text()
+	display_neg_9999_77._advance_scientific(1)
+	neg_9999_77_first = display_neg_9999_77.get_text()
+	display_neg_9999_77._advance_scientific(1)
+	neg_9999_77_second = display_neg_9999_77.get_text()
+	expected_actual.append((
+		"-9999/77 initial display",
+		"-129.857142857142",
+		neg_9999_77_initial,
+	))
+	expected_actual.append((
+		"-9999/77 first shift display",
+		"-…29.8571428571428",
+		neg_9999_77_first,
+	))
+	expected_actual.append((
+		"-9999/77 second shift display",
+		"-…9.85714285714285",
+		neg_9999_77_second,
+	))
+	checks.append((
+		"-9999/77 first shift adds one right-side digit",
+		neg_9999_77_initial == "-129.857142857142"
+		and neg_9999_77_first == "-…29.8571428571428"
+		and neg_9999_77_second == "-…9.85714285714285",
+	))
+	display_neg_large_decimal = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("0-12345678901234567/1000"))
+	neg_large_decimal_initial = display_neg_large_decimal.get_text()
+	display_neg_large_decimal._advance_scientific(1)
+	neg_large_decimal_first = display_neg_large_decimal.get_text()
+	display_neg_large_decimal._advance_scientific(1)
+	neg_large_decimal_second = display_neg_large_decimal.get_text()
+	expected_actual.append((
+		"-12345678901234567/1000 initial display",
+		"-12345678901234.5",
+		neg_large_decimal_initial,
+	))
+	expected_actual.append((
+		"-12345678901234567/1000 first shift display",
+		"-…2345678901234.56",
+		neg_large_decimal_first,
+	))
+	expected_actual.append((
+		"-12345678901234567/1000 second shift display",
+		"-…345678901234.567",
+		neg_large_decimal_second,
+	))
+	checks.append((
+		"negative plain decimal from scientific source counts sign initially",
+		neg_large_decimal_initial == "-12345678901234.5"
+		and neg_large_decimal_first == "-…2345678901234.56"
+		and neg_large_decimal_second == "-…345678901234.567",
+	))
+	# Al desplazar a la derecha se conserva el signo y entra el carácter extra de scroll.
 	display_neg_dec._advance_scientific(1)
 	neg_dec_shifted = display_neg_dec.get_text()
 	checks.append((
-		"-23/27 first shift reverts to 17-char body",
+		"-23/27 first shift keeps 17 chars besides ellipsis",
 		len(neg_dec_shifted.replace("…", "")) == 17,
 	))
 	# Regreso al inicio restaura la vista expandida
@@ -646,6 +816,28 @@ def run_regressions() -> None:
 		"-25^25 scroll back restores expanded initial",
 		display_neg_sci.get_text() == neg_sci_initial,
 	))
+	display_neg_fact_decimal_source = _make_display(ArbitraryPrecisionCalculatorEngine(
+		initial_digits=260,
+		precision_step=120,
+	).evaluate("-90!"))
+	neg_fact_decimal_source_initial = display_neg_fact_decimal_source.get_text()
+	display_neg_fact_decimal_source._advance_scientific(1)
+	neg_fact_decimal_source_first = display_neg_fact_decimal_source.get_text()
+	expected_actual.append((
+		"-90! initial display from decimal source",
+		"-1.4857159644e+138",
+		neg_fact_decimal_source_initial,
+	))
+	expected_actual.append((
+		"-90! first shift from decimal source",
+		"-…48571596448e+127",
+		neg_fact_decimal_source_first,
+	))
+	checks.append((
+		"-90! compact scientific initial keeps sign outside visible budget",
+		neg_fact_decimal_source_initial == "-1.4857159644e+138"
+		and neg_fact_decimal_source_first == "-…48571596448e+127",
+	))
 
 	# Números positivos no deben cambiar (siguen con 17 chars)
 	display_pos = _make_display("0.3333333333333333")
@@ -672,6 +864,188 @@ def run_regressions() -> None:
 		raise SystemExit(1)
 
 	print("\nAll regression checks passed.")
+
+
+def _run_decimal_separator_regressions() -> None:
+	checks: list[tuple[str, bool]] = []
+	expected_actual: list[tuple[str, str, str]] = []
+
+	def _expect_equal(label: str, expected: str, actual: str) -> None:
+		expected_actual.append((label, expected, actual))
+		checks.append((label, expected == actual))
+
+	engine = ArbitraryPrecisionCalculatorEngine(initial_digits=260, precision_step=120)
+
+	display_15_fact = _make_display(engine.evaluate("15!"))
+	_expect_equal(
+		"15! initial display uses thousands separators",
+		"1,307,674,368,000",
+		display_15_fact.get_text(),
+	)
+	display_15_fact._advance_scientific(1)
+	_expect_equal(
+		"15! stays non-scrollable with separators",
+		"1,307,674,368,000",
+		display_15_fact.get_text(),
+	)
+	checks.append((
+		"15! ctrl+copy keeps standard scientific copy usable",
+		display_15_fact.get_copy_text(standard_scientific=True) == "1.307674368e+12",
+	))
+
+	display_neg_decimal = _make_display(engine.evaluate("-11^12-sqrt(2)"))
+	neg_initial = display_neg_decimal.get_text()
+	_expect_equal(
+		"negative decimal initial display uses thousands separators",
+		"-3,138,428,376,722.41",
+		neg_initial,
+	)
+	checks.append((
+		"negative decimal separator display keeps the same digit count",
+		len(neg_initial.replace(",", "").replace("-", "").replace(".", "")) == 15,
+	))
+	display_neg_decimal._advance_scientific(1)
+	_expect_equal(
+		"negative decimal first shift keeps grouped decimal window",
+		"-…138,428,376,722.414",
+		display_neg_decimal.get_text(),
+	)
+	display_neg_decimal._advance_scientific(-1)
+	_expect_equal(
+		"negative decimal scroll back restores grouped initial display",
+		"-3,138,428,376,722.41",
+		display_neg_decimal.get_text(),
+	)
+
+	display_fit_decimal = _make_display(engine.evaluate("1234567891234567/10"))
+	_expect_equal(
+		"fit decimal initial display uses thousands separators",
+		"123,456,789,123,456.7",
+		display_fit_decimal.get_text(),
+	)
+	display_fit_decimal._advance_scientific(1)
+	_expect_equal(
+		"fit decimal remains non-scrollable with separators",
+		"123,456,789,123,456.7",
+		display_fit_decimal.get_text(),
+	)
+
+	display_14_13 = _make_display(engine.evaluate("14^13"))
+	for _ in range(4):
+		display_14_13._advance_scientific(1)
+	for _ in range(4):
+		display_14_13._advance_scientific(-1)
+	_expect_equal(
+		"14^13 grouped initial display ignores repeated scroll attempts",
+		"793,714,773,254,144",
+		display_14_13.get_text(),
+	)
+
+	display_16_fact = _make_display(engine.evaluate("16!"))
+	for _ in range(4):
+		display_16_fact._advance_scientific(1)
+	for _ in range(4):
+		display_16_fact._advance_scientific(-1)
+	_expect_equal(
+		"16! grouped initial display ignores repeated scroll attempts",
+		"20,922,789,888,000",
+		display_16_fact.get_text(),
+	)
+
+	display_17_fact_sqrt = _make_display(engine.evaluate("17!+sqrt(2)"))
+	display_17_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"17!+sqrt(2) first shift keeps grouped decimal window",
+		"…55,687,428,096,001.41",
+		display_17_fact_sqrt.get_text(),
+	)
+	display_17_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"17!+sqrt(2) second shift keeps grouped decimal window",
+		"…5,687,428,096,001.414",
+		display_17_fact_sqrt.get_text(),
+	)
+	display_17_fact_sqrt._advance_scientific(-1)
+	_expect_equal(
+		"17!+sqrt(2) left shift restores previous grouped window",
+		"…55,687,428,096,001.41",
+		display_17_fact_sqrt.get_text(),
+	)
+
+	display_neg_16_fact_sqrt = _make_display(engine.evaluate("-16!-sqrt(3)"))
+	display_neg_16_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"-16!-sqrt(3) first shift keeps grouped decimal window",
+		"-…0,922,789,888,001.73",
+		display_neg_16_fact_sqrt.get_text(),
+	)
+	display_neg_16_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"-16!-sqrt(3) second shift keeps grouped decimal window",
+		"-…922,789,888,001.732",
+		display_neg_16_fact_sqrt.get_text(),
+	)
+	display_neg_16_fact_sqrt._advance_scientific(-1)
+	_expect_equal(
+		"-16!-sqrt(3) left shift restores previous grouped window",
+		"-…0,922,789,888,001.73",
+		display_neg_16_fact_sqrt.get_text(),
+	)
+
+	display_60_fact_sqrt = _make_display(engine.evaluate("60!+sqrt(8)"))
+	for _ in range(65):
+		display_60_fact_sqrt._advance_scientific(1)
+	_expect_equal(
+		"60!+sqrt(8) late decimal bridge stays ungrouped",
+		"…09600000000000002",
+		display_60_fact_sqrt.get_text(),
+	)
+
+	display_101_fact = _make_display(engine.evaluate("101!"))
+	checks.append((
+		"101! initial scientific display has no thousands separators",
+		"," not in display_101_fact.get_text()
+		and display_101_fact.get_text() == "9.4259477598e+159",
+	))
+	display_fractional_power = _make_display(engine.evaluate("23.45^67.89"))
+	checks.append((
+		"23.45^67.89 initial scientific display has no thousands separators",
+		"," not in display_fractional_power.get_text()
+		and display_fractional_power.get_text() == "1.04471513460e+93",
+	))
+
+	failed = [name for name, ok in checks if not ok]
+	for name, ok in checks:
+		print(f"{name}: {'OK' if ok else 'FAIL'}")
+
+	print("\nExpected vs Actual:")
+	for label, expected, actual in expected_actual:
+		status = "OK" if expected == actual else "FAIL"
+		print(f"- {label}: {status}")
+		print(f"  expected: {expected}")
+		print(f"  actual:   {actual}")
+
+	if failed:
+		print("\nFAILED CHECKS:")
+		for name in failed:
+			print(f"- {name}")
+		raise SystemExit(1)
+
+	print("\nAll decimal separator regression checks passed.")
+
+
+def run_regressions() -> None:
+	original_visible_chars = ResultDisplay.VISIBLE_CHARS
+	original_decimal_separator = ResultDisplay.DECIMAL_SEPARATOR
+	try:
+		ResultDisplay.VISIBLE_CHARS = 17
+		ResultDisplay.DECIMAL_SEPARATOR = False
+		_run_width_17_regressions()
+		ResultDisplay.DECIMAL_SEPARATOR = True
+		_run_decimal_separator_regressions()
+	finally:
+		ResultDisplay.VISIBLE_CHARS = original_visible_chars
+		ResultDisplay.DECIMAL_SEPARATOR = original_decimal_separator
 
 
 if __name__ == "__main__":

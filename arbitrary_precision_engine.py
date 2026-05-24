@@ -91,6 +91,7 @@ class ArbitraryPrecisionCalculatorEngine:
     """Evalúa expresiones con precisión arbitraria y dígitos progresivos."""
 
     SCI_NOTATION_EXP_LIMIT = 12
+    COMPLEX_DISPLAY_DIGITS = 8
 
     def __init__(self, initial_digits: int = 18, precision_step: int = 24):
         self._provider = MPMathProvider()
@@ -139,12 +140,15 @@ class ArbitraryPrecisionCalculatorEngine:
         return self._format_result(self._last_value, self._working_digits)
 
     def can_expand_precision(self) -> bool:
-        return self._last_expression is not None and not self._is_terminal_precision_value(self._last_value)
+        return self._last_expression is not None and not self._is_terminal_precision_value(
+            self._last_value,
+            self._working_digits,
+        )
 
     def request_more_precision(self) -> str:
         if not self._last_expression:
             raise ValueError("No hay cálculo previo")
-        if self._is_terminal_precision_value(self._last_value):
+        if self._is_terminal_precision_value(self._last_value, self._working_digits):
             if self._is_complex_value(self._last_value):
                 raise ValueError("Los resultados complejos no expanden precisión")
             raise ValueError("Este resultado no admite más precisión")
@@ -186,7 +190,14 @@ class ArbitraryPrecisionCalculatorEngine:
         return mp.isfinite(mp_value) and mp.fmod(mp_value, 1) == 0
 
     @staticmethod
-    def _is_terminal_precision_value(value) -> bool:
+    def _integer_digit_count(value) -> int:
+        if value == 0:
+            return 1
+
+        return max(1, int(mp.floor(mp.log10(abs(value)))) + 1)
+
+    @staticmethod
+    def _is_terminal_precision_value(value, working_digits: int | None = None) -> bool:
         if isinstance(value, mp.mpc):
             return True
 
@@ -201,7 +212,12 @@ class ArbitraryPrecisionCalculatorEngine:
         if isinstance(value, mp.mpf):
             if not mp.isfinite(value):
                 return True
-            return ArbitraryPrecisionCalculatorEngine._is_exact_integer_value(value)
+            if not ArbitraryPrecisionCalculatorEngine._is_exact_integer_value(value):
+                return False
+            if working_digits is None:
+                return True
+
+            return ArbitraryPrecisionCalculatorEngine._integer_digit_count(value) <= working_digits
 
         try:
             mp_value = mp.mpf(value)
@@ -210,7 +226,12 @@ class ArbitraryPrecisionCalculatorEngine:
 
         if not mp.isfinite(mp_value):
             return True
-        return ArbitraryPrecisionCalculatorEngine._is_exact_integer_value(mp_value)
+        if not ArbitraryPrecisionCalculatorEngine._is_exact_integer_value(mp_value):
+            return False
+        if working_digits is None:
+            return True
+
+        return ArbitraryPrecisionCalculatorEngine._integer_digit_count(mp_value) <= working_digits
 
     def _prepare_expression(self, expression: str) -> str:
         processed = self._evaluator.prepare(expression)
@@ -280,8 +301,9 @@ class ArbitraryPrecisionCalculatorEngine:
             return f"{value:.15g}"
 
         if isinstance(value, mp.mpc):
-            real = mp.nstr(value.real, n=digits)
-            imag = mp.nstr(abs(value.imag), n=digits)
+            complex_digits = min(digits, ArbitraryPrecisionCalculatorEngine.COMPLEX_DISPLAY_DIGITS)
+            real = mp.nstr(value.real, n=complex_digits)
+            imag = mp.nstr(abs(value.imag), n=complex_digits)
             sign = "+" if value.imag >= 0 else "-"
             return f"({real} {sign} {imag}j)"
 
