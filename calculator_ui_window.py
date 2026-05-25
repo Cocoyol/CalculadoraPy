@@ -6,6 +6,8 @@ interfaz, el teclado, los toggles y el hilo de cálculo en segundo plano.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import sys
 import tkinter as tk
 from tkinter import font as tkfont
 
@@ -94,6 +96,7 @@ class CalculatorApp:
         self.root.configure(bg=self.C["bg"])
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._apply_window_icon()
 
         # Si no se inyecta un motor, se conserva el legacy por compatibilidad
         # con arneses y pruebas que instancian la ventana directamente.
@@ -129,6 +132,56 @@ class CalculatorApp:
         self._resize_pending: str | None = None
         self.root.after(250, self._record_base_size)
         self.root.bind("<Configure>", self._on_root_configure)
+
+    # ── Icono de ventana ─────────────────────────────────────────
+
+    def _icon_base_dir(self) -> Path:
+        """Directorio donde buscar los recursos de icono.
+
+        Con Nuitka onefile, los datos incluidos se extraen junto al módulo,
+        por lo que `Path(__file__).parent` resuelve correctamente tanto en
+        ejecución desde fuente como empaquetado.
+        """
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).parent
+            if (exe_dir / "icon-calculator.ico").exists() or (exe_dir / "icons").exists():
+                return exe_dir
+        return Path(__file__).resolve().parent
+
+    def _apply_window_icon(self):
+        """Asigna el icono multi-resolución a la ventana.
+
+        En Windows, `iconbitmap(default=...)` con un .ico multi-res ofrece la
+        mejor calidad para la barra de tareas y el título; complementamos con
+        `iconphoto` cargando varios PNG para que Tk elija el mejor tamaño
+        (incluido el mini-icono junto al título) preservando transparencia.
+        """
+        base = self._icon_base_dir()
+        ico_path = base / "icon-calculator.ico"
+        try:
+            if ico_path.exists():
+                self.root.iconbitmap(default=str(ico_path))
+        except tk.TclError:
+            pass
+
+        icons_dir = base / "icons"
+        png_sizes = (16, 24, 32, 48, 64, 128, 256)
+        photos: list[tk.PhotoImage] = []
+        for size in png_sizes:
+            png_path = icons_dir / f"icon-{size}.png"
+            if not png_path.exists():
+                continue
+            try:
+                photos.append(tk.PhotoImage(file=str(png_path)))
+            except tk.TclError:
+                continue
+        if photos:
+            # Mantener referencias para que Tk no libere las imágenes.
+            self._icon_photos = photos
+            try:
+                self.root.iconphoto(True, *photos)
+            except tk.TclError:
+                pass
 
     # ── Fuentes ──────────────────────────────────────────────────
 
