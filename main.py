@@ -1,4 +1,4 @@
-# nuitka-project: --mode=onefile
+# nuitka-project: --mode=standalone
 # nuitka-project: --follow-imports
 # nuitka-project: --enable-plugin=tk-inter
 # nuitka-project: --python-flag=no_docstrings,no_asserts,isolated
@@ -20,6 +20,7 @@
 # nuitka-project: --nofollow-import-to=regression_scroll_30_checks
 # nuitka-project: --nofollow-import-to=benchmark_scroll_advance
 # nuitka-project: --nofollow-import-to=generate_icons
+# nuitka-project: --prefer-source-code
 
 """Punto de entrada de la calculadora científica."""
 
