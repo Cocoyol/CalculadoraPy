@@ -95,7 +95,7 @@ class ArbitraryPrecisionCalculatorEngine:
 
     def __init__(self, initial_digits: int = 18, precision_step: int = 24):
         self._provider = MPMathProvider()
-        self._evaluator = FormulaEvaluator(self._provider)
+        self._evaluator = FormulaEvaluator()
 
         self._initial_digits = max(8, initial_digits)
         self._precision_step = max(8, precision_step)

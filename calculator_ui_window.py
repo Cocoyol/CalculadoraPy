@@ -6,10 +6,12 @@ interfaz, el teclado, los toggles y el hilo de cálculo en segundo plano.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import sys
 import tkinter as tk
 from tkinter import font as tkfont
 
-from calculator_engine import CalculatorEngine
+from arbitrary_precision_engine import ArbitraryPrecisionCalculatorEngine
 from calculator_config_normalizations import get_decimal_separator_enabled, get_visible_chars
 from calculator_ui_results import ResultDisplay
 from calculator_ui_settings import open_settings_dialog
@@ -23,24 +25,29 @@ from calculator_ui_history import HistoryWindow
 class CalculatorApp:
     """Ventana principal de la calculadora científica."""
 
-    # ── Paleta de colores ────────────────────────────────────────
+    # ── Paleta de colores (Nord) ──────────────────────────────────
+    # Polar Night: #2E3440 #3B4252 #434C5E #4C566A
+    # Snow Storm:  #D8DEE9 #E5E9F0 #ECEFF4
+    # Frost:       #8FBCBB #88C0D0 #81A1C1 #5E81AC
+    # Aurora:      #BF616A #D08770 #EBCB8B #A3BE8C #B48EAD
     C = {
-        "bg":         "#1E1E2E",
-        "display_bg": "#181825",
-        "num":        "#313244",
-        "num_fg":     "#CDD6F4",
-        "op":         "#F38BA8",
-        "op_fg":      "#1E1E2E",
-        "func":       "#45475A",
-        "func_fg":    "#CDD6F4",
-        "special":    "#585B70",
-        "special_fg": "#CDD6F4",
-        "equals":     "#89B4FA",
-        "equals_fg":  "#1E1E2E",
-        "toggle_on":  "#A6E3A1",
-        "toggle_off": "#585B70",
-        "expr_fg":    "#BAC2DE",
-        "result_fg":  "#A6E3A1",
+        "bg":         "#2E3440",   # Polar Night 1  – fondo general
+        "display_bg": "#242933",   # más oscuro para la pantalla
+        "num":        "#3B4252",   # Polar Night 2  – dígitos (oscuro)
+        "num_fg":     "#ECEFF4",   # Snow Storm 3
+        "op":         "#D08770",   # Aurora Orange  – operadores básicos
+        "op_fg":      "#2E3440",
+        "func":       "#4C566A",   # Polar Night 4  – funciones (más claro que num)
+        "func_fg":    "#ECEFF4",
+        "special":    "#BF616A",   # Aurora Red     – AC / borrar (destructivo)
+        "special_fg": "#ECEFF4",
+        "equals":     "#A3BE8C",   # Aurora Green   – igual (confirmar)
+        "equals_fg":  "#2E3440",
+        "toggle_on":  "#88C0D0",   # Frost          – modo activo
+        "toggle_off": "#434C5E",   # Polar Night 3  – modo inactivo
+        "active":     "#cdb5cd",   # Aurora Pink    – fondo botón activo (hover o toggle on)
+        "expr_fg":    "#D8DEE9",   # Snow Storm 1
+        "result_fg":  "#88C0D0",   # Frost          – resultado
     }
 
     # ── Definiciones de botones científicos ──────────────────────
@@ -89,10 +96,9 @@ class CalculatorApp:
         self.root.configure(bg=self.C["bg"])
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._apply_window_icon()
 
-        # Si no se inyecta un motor, se conserva el legacy por compatibilidad
-        # con arneses y pruebas que instancian la ventana directamente.
-        self.engine = engine if engine is not None else CalculatorEngine()
+        self.engine = engine if engine is not None else ArbitraryPrecisionCalculatorEngine()
         self._inv_mode = False
         self._last_engine_result: str | None = None
         self._history: list[tuple[str, str]] = []
@@ -125,15 +131,65 @@ class CalculatorApp:
         self.root.after(250, self._record_base_size)
         self.root.bind("<Configure>", self._on_root_configure)
 
+    # ── Icono de ventana ─────────────────────────────────────────
+
+    def _icon_base_dir(self) -> Path:
+        """Directorio donde buscar los recursos de icono.
+
+        Con Nuitka onefile, los datos incluidos se extraen junto al módulo,
+        por lo que `Path(__file__).parent` resuelve correctamente tanto en
+        ejecución desde fuente como empaquetado.
+        """
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).parent
+            if (exe_dir / "icon-calculator.ico").exists() or (exe_dir / "icons").exists():
+                return exe_dir
+        return Path(__file__).resolve().parent
+
+    def _apply_window_icon(self):
+        """Asigna el icono multi-resolución a la ventana.
+
+        En Windows, `iconbitmap(default=...)` con un .ico multi-res ofrece la
+        mejor calidad para la barra de tareas y el título; complementamos con
+        `iconphoto` cargando varios PNG para que Tk elija el mejor tamaño
+        (incluido el mini-icono junto al título) preservando transparencia.
+        """
+        base = self._icon_base_dir()
+        ico_path = base / "icon-calculator.ico"
+        try:
+            if ico_path.exists():
+                self.root.iconbitmap(default=str(ico_path))
+        except tk.TclError:
+            pass
+
+        icons_dir = base / "icons"
+        png_sizes = (16, 24, 32, 48, 64, 128, 256)
+        photos: list[tk.PhotoImage] = []
+        for size in png_sizes:
+            png_path = icons_dir / f"icon-{size}.png"
+            if not png_path.exists():
+                continue
+            try:
+                photos.append(tk.PhotoImage(file=str(png_path)))
+            except tk.TclError:
+                continue
+        if photos:
+            # Mantener referencias para que Tk no libere las imágenes.
+            self._icon_photos = photos
+            try:
+                self.root.iconphoto(True, *photos)
+            except tk.TclError:
+                pass
+
     # ── Fuentes ──────────────────────────────────────────────────
 
     def _init_fonts(self):
-        self._f_expr   = tkfont.Font(family="Consolas", size=16)
-        self._f_result = tkfont.Font(family="Consolas", size=22, weight="bold")
-        self._f_btn    = tkfont.Font(family="Segoe UI", size=15)
-        self._f_func   = tkfont.Font(family="Segoe UI", size=12)
-        self._f_small  = tkfont.Font(family="Segoe UI", size=11)
-        self._base_font_sizes = {"expr": 16, "result": 22, "btn": 15, "func": 12, "small": 11}
+        self._f_expr   = tkfont.Font(family="Consolas", size=19)
+        self._f_result = tkfont.Font(family="Consolas", size=25, weight="bold")
+        self._f_btn    = tkfont.Font(family="Segoe UI", size=18)
+        self._f_func   = tkfont.Font(family="Segoe UI", size=14)
+        self._f_small  = tkfont.Font(family="Segoe UI", size=12)
+        self._base_font_sizes = {"expr": 19, "result": 25, "btn": 18, "func": 14, "small": 12}
 
     # ── Pantalla ─────────────────────────────────────────────────
 
@@ -171,7 +227,7 @@ class CalculatorApp:
         self._copy_btn = tk.Button(
             row, text="Copiar", font=self._f_small,
             bg=self.C["func"], fg=self.C["func_fg"],
-            activebackground=self.C["special"], relief="flat",
+            activebackground=self.C["active"], relief="flat",
             cursor="hand2", command=self._copy_result, padx=8,
         )
         self._copy_btn.bind("<Button-1>", self._on_copy_press)
@@ -224,8 +280,8 @@ class CalculatorApp:
 
         self._settings_btn = tk.Button(
             frame, text="\u2699", font=self._f_small,
-            bg=self.C["toggle_off"], fg="#F9E2AF",
-            activebackground=self.C["special"], relief="flat",
+            bg=self.C["toggle_off"], fg="#EBCB8B",
+            activebackground=self.C["active"], relief="flat",
             cursor="hand2", command=self._open_settings,
         )
         self._settings_btn.pack(side="right")
@@ -233,7 +289,7 @@ class CalculatorApp:
         self._history_btn = tk.Button(
             frame, text="Historial", font=self._f_small,
             bg=self.C["toggle_off"], fg=self.C["special_fg"],
-            activebackground=self.C["special"], relief="flat",
+            activebackground=self.C["active"], relief="flat",
             cursor="hand2", command=self._open_history,
         )
         self._history_btn.pack(side="right", padx=(0, 4))
@@ -253,11 +309,11 @@ class CalculatorApp:
             btn = tk.Button(
                 frame, text=text_norm, font=self._f_func,
                 bg=self.C["func"], fg=self.C["func_fg"],
-                activebackground=self.C["special"], relief="flat",
+                activebackground=self.C["active"], relief="flat",
                 command=lambda c=col: self._on_science(c),
             )
-            btn.grid(row=0, column=col, sticky="nsew", padx=2, pady=2,
-                     ipady=6)
+            btn.grid(row=0, column=col, sticky="nsew", padx=1, pady=1,
+                     ipady=0)
             self._sci_buttons.append(btn)
 
     # ── Teclado numérico / operadores ────────────────────────────
@@ -284,12 +340,12 @@ class CalculatorApp:
                 fg = self.C[f"{kind}_fg"]
                 btn = tk.Button(
                     frame, text=text, font=self._f_btn,
-                    bg=bg, fg=fg, activebackground=self.C["special"],
+                    bg=bg, fg=fg, activebackground=self.C["active"],
                     relief="flat",
                     command=lambda a=action: self._on_key(a),
                 )
                 btn.grid(row=r, column=col_pos, columnspan=spans[idx],
-                         sticky="nsew", padx=2, pady=2, ipady=8)
+                         sticky="nsew", padx=1, pady=1, ipady=0)
                 col_pos += spans[idx]
 
         for r in range(len(self.KEYPAD)):
@@ -545,6 +601,7 @@ class CalculatorApp:
         cur = self.expr_var.get()
         self.expr_var.set(cur[:pos] + text + cur[pos:])
         self.expr_entry.icursor(pos + len(text))
+        self.expr_entry.xview(tk.INSERT)
 
     # ── Toggles ──────────────────────────────────────────────────
 
