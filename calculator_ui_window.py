@@ -11,7 +11,7 @@ import sys
 import tkinter as tk
 from tkinter import font as tkfont
 
-from calculator_engine import CalculatorEngine
+from arbitrary_precision_engine import ArbitraryPrecisionCalculatorEngine
 from calculator_config_normalizations import get_decimal_separator_enabled, get_visible_chars
 from calculator_ui_results import ResultDisplay
 from calculator_ui_settings import open_settings_dialog
@@ -98,9 +98,7 @@ class CalculatorApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._apply_window_icon()
 
-        # Si no se inyecta un motor, se conserva el legacy por compatibilidad
-        # con arneses y pruebas que instancian la ventana directamente.
-        self.engine = engine if engine is not None else CalculatorEngine()
+        self.engine = engine if engine is not None else ArbitraryPrecisionCalculatorEngine()
         self._inv_mode = False
         self._last_engine_result: str | None = None
         self._history: list[tuple[str, str]] = []

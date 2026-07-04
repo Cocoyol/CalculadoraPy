@@ -1,62 +1,10 @@
 """Parseo y evaluación de expresiones para la calculadora científica."""
 
-import math
 import re
 
 
-class PythonMathProvider:
-    """Provee funciones y constantes matemáticas en un namespace seguro."""
-
-    def __init__(self):
-        self._angle_mode = "rad"
-
-    @property
-    def angle_mode(self) -> str:
-        return self._angle_mode
-
-    @angle_mode.setter
-    def angle_mode(self, mode: str):
-        if mode not in ("rad", "deg"):
-            raise ValueError("El modo debe ser 'rad' o 'deg'")
-        self._angle_mode = mode
-
-    def build_namespace(self) -> dict:
-        mode = self._angle_mode
-
-        def _trig(fn):
-            def w(x):
-                return fn(math.radians(x) if mode == "deg" else x)
-
-            return w
-
-        def _inv_trig(fn):
-            def w(x):
-                r = fn(x)
-                return math.degrees(r) if mode == "deg" else r
-
-            return w
-
-        return {
-            "sin": _trig(math.sin),
-            "cos": _trig(math.cos),
-            "tan": _trig(math.tan),
-            "asin": _inv_trig(math.asin),
-            "acos": _inv_trig(math.acos),
-            "atan": _inv_trig(math.atan),
-            "ln": math.log,
-            "log": math.log10,
-            "sqrt": math.sqrt,
-            "factorial": math.factorial,
-            "exp": math.exp,
-            "abs": abs,
-            "π": math.pi,
-            "pi": math.pi,
-            "e": math.e,
-        }
-
-
 class FormulaEvaluator:
-    """Transforma expresiones de UI y evalúa su valor numérico."""
+    """Valida y transforma expresiones de la interfaz."""
 
     _ALLOWED_CHARS = re.compile(r"^[\d\s+\-*/^().,!%πa-zA-Z×÷−√]*$")
     _ALLOWED_IDENTIFIERS = {
@@ -92,26 +40,12 @@ class FormulaEvaluator:
     }
     _CONSTANT_IDENTIFIERS = {"pi", "e", "π"}
 
-    def __init__(self, provider: PythonMathProvider):
-        self._provider = provider
-
     def prepare(self, expression: str) -> str:
         if not expression or not expression.strip():
             raise ValueError("Expresión vacía")
 
         self._validate_raw_expression(expression)
         return self._preprocess(expression)
-
-    def evaluate(self, expression: str):
-        processed = self.prepare(expression)
-        namespace = self._provider.build_namespace()
-
-        try:
-            return eval(processed, {"__builtins__": {}}, namespace)
-        except SyntaxError as exc:
-            raise ValueError("Error de sintaxis") from exc
-        except NameError as exc:
-            raise ValueError(f"Desconocido: {exc}") from exc
 
     def _validate_raw_expression(self, expression: str):
         if not self._ALLOWED_CHARS.fullmatch(expression):
