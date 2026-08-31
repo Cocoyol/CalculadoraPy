@@ -5,22 +5,62 @@ Contiene CalculatorApp: construye y gestiona los controles de la
 interfaz, el teclado, los toggles y el hilo de cálculo en segundo plano.
 """
 
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+import contextlib
 import sys
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from tkinter import font as tkfont
 
 from arbitrary_precision_engine import ArbitraryPrecisionCalculatorEngine
-from calculator_config_normalizations import get_decimal_separator_enabled, get_visible_chars
+from calculator_config_normalizations import (
+    get_decimal_separator_enabled,
+    get_visible_chars,
+)
+from calculator_ui_history import HistoryWindow
 from calculator_ui_results import ResultDisplay
 from calculator_ui_settings import open_settings_dialog
-from calculator_ui_history import HistoryWindow
 
+# ── Continuación posresultado con `A` (sección 3.2 del plan ANS) ────
+# Clasificación semántica cerrada: la clase visual de un botón no decide
+# la continuación automática; solo estas plantillas y teclas la activan.
+
+# Plantillas de los botones del teclado principal tras un resultado válido
+# visible: operadores binarios y postfijos.
+_RESULT_CONTINUATION_TEMPLATES = {
+    "insert:+": "A+",
+    "insert:\u2212": "A\u2212",
+    "insert:\u00d7": "A\u00d7",
+    "insert:\u00f7": "A\u00f7",
+    "insert:^": "A^",
+    "insert:!": "A!",
+    "insert:%": "A%",
+}
+
+# Plantillas del panel científico tras un resultado válido visible,
+# indexadas por (columna en SCIENCE_BUTTONS, modo INV).
+_SCIENCE_RESULT_TEMPLATES = {
+    (0, False): "\u221a(A)",
+    (0, True): "A^(2)",
+    (1, False): "sin(A)",
+    (1, True): "asin(A)",
+    (2, False): "cos(A)",
+    (2, True): "acos(A)",
+    (3, False): "tan(A)",
+    (3, True): "atan(A)",
+    (4, False): "ln(A)",
+    (4, True): "exp(A)",
+    (5, False): "log(A)",
+    (5, True): "10^(A)",
+}
+
+# Únicas teclas físicas que anteponen `A` tras un resultado válido visible.
+_PHYSICAL_RESULT_CONTINUATION_KEYS = frozenset("+-\u2212*/\u00d7\u00f7^!%")
 
 # ═════════════════════════════════════════════════════════════════
 #  Aplicación principal
 # ═════════════════════════════════════════════════════════════════
+
 
 class CalculatorApp:
     """Ventana principal de la calculadora científica."""
@@ -31,35 +71,35 @@ class CalculatorApp:
     # Frost:       #8FBCBB #88C0D0 #81A1C1 #5E81AC
     # Aurora:      #BF616A #D08770 #EBCB8B #A3BE8C #B48EAD
     C = {
-        "bg":         "#2E3440",   # Polar Night 1  – fondo general
-        "display_bg": "#242933",   # más oscuro para la pantalla
-        "num":        "#3B4252",   # Polar Night 2  – dígitos (oscuro)
-        "num_fg":     "#ECEFF4",   # Snow Storm 3
-        "op":         "#D08770",   # Aurora Orange  – operadores básicos
-        "op_fg":      "#2E3440",
-        "func":       "#4C566A",   # Polar Night 4  – funciones (más claro que num)
-        "func_fg":    "#ECEFF4",
-        "special":    "#BF616A",   # Aurora Red     – AC / borrar (destructivo)
+        "bg": "#2E3440",  # Polar Night 1  – fondo general
+        "display_bg": "#242933",  # más oscuro para la pantalla
+        "num": "#3B4252",  # Polar Night 2  – dígitos (oscuro)
+        "num_fg": "#ECEFF4",  # Snow Storm 3
+        "op": "#D08770",  # Aurora Orange  – operadores básicos
+        "op_fg": "#2E3440",
+        "func": "#4C566A",  # Polar Night 4  – funciones (más claro que num)
+        "func_fg": "#ECEFF4",
+        "special": "#BF616A",  # Aurora Red     – AC / borrar (destructivo)
         "special_fg": "#ECEFF4",
-        "equals":     "#A3BE8C",   # Aurora Green   – igual (confirmar)
-        "equals_fg":  "#2E3440",
-        "toggle_on":  "#88C0D0",   # Frost          – modo activo
-        "toggle_off": "#434C5E",   # Polar Night 3  – modo inactivo
-        "active":     "#cdb5cd",   # Aurora Pink    – fondo botón activo (hover o toggle on)
-        "expr_fg":    "#D8DEE9",   # Snow Storm 1
-        "result_fg":  "#88C0D0",   # Frost          – resultado
+        "equals": "#A3BE8C",  # Aurora Green   – igual (confirmar)
+        "equals_fg": "#2E3440",
+        "toggle_on": "#88C0D0",  # Frost          – modo activo
+        "toggle_off": "#434C5E",  # Polar Night 3  – modo inactivo
+        "active": "#cdb5cd",  # Aurora Pink    – fondo botón activo (hover o toggle on)
+        "expr_fg": "#D8DEE9",  # Snow Storm 1
+        "result_fg": "#88C0D0",  # Frost          – resultado
     }
 
     # ── Definiciones de botones científicos ──────────────────────
     #  (texto_normal, inserta_normal, texto_inv, inserta_inv)
 
     SCIENCE_BUTTONS = [
-        ("\u221A",   "\u221A(",   "x\u00B2",       "^(2)"),    # √  / x²
-        ("sin",      "sin(",      "sin\u207B\u00B9","asin("),   # sin / asin
-        ("cos",      "cos(",      "cos\u207B\u00B9","acos("),   # cos / acos
-        ("tan",      "tan(",      "tan\u207B\u00B9","atan("),   # tan / atan
-        ("ln",       "ln(",       "e\u02E3",        "exp("),    # ln  / eˣ
-        ("log",      "log(",      "10\u02E3",       "10^("),    # log / 10ˣ
+        ("\u221a", "\u221a(", "x\u00b2", "^(2)"),  # √  / x²
+        ("sin", "sin(", "sin\u207b\u00b9", "asin("),  # sin / asin
+        ("cos", "cos(", "cos\u207b\u00b9", "acos("),  # cos / acos
+        ("tan", "tan(", "tan\u207b\u00b9", "atan("),  # tan / atan
+        ("ln", "ln(", "e\u02e3", "exp("),  # ln  / eˣ
+        ("log", "log(", "10\u02e3", "10^("),  # log / 10ˣ
     ]
 
     # ── Definiciones del teclado principal ────────────────────────
@@ -67,24 +107,44 @@ class CalculatorApp:
     #  tipo_color: "num", "op", "func", "special", "equals"
 
     KEYPAD = [
-        [("!",  "insert:!",  "func"),  ("^", "insert:^", "func"),
-         ("\u03C0","insert:\u03C0","func"), ("e","insert:e","func"),
-         ("(",  "insert:(",  "func"),  (")", "insert:)", "func")],
-
-        [("AC", "clear",     "special"), ("\u232B","backspace","special"),
-         ("%",  "insert:%",  "func"),    ("\u00F7","insert:\u00F7","op")],
-
-        [("7",  "insert:7",  "num"), ("8","insert:8","num"),
-         ("9",  "insert:9",  "num"), ("\u00D7","insert:\u00D7","op")],
-
-        [("4",  "insert:4",  "num"), ("5","insert:5","num"),
-         ("6",  "insert:6",  "num"), ("\u2212","insert:\u2212","op")],
-
-        [("1",  "insert:1",  "num"), ("2","insert:2","num"),
-         ("3",  "insert:3",  "num"), ("+","insert:+","op")],
-
-        [("0",  "insert:0",  "num"), (".",  "insert:.",  "num"),
-         ("=",  "equals",    "equals")],
+        [
+            ("!", "insert:!", "func"),
+            ("^", "insert:^", "func"),
+            ("\u03c0", "insert:\u03c0", "func"),
+            ("e", "insert:e", "func"),
+            ("(", "insert:(", "func"),
+            (")", "insert:)", "func"),
+        ],
+        [
+            ("AC", "clear", "special"),
+            ("\u232b", "backspace", "special"),
+            ("%", "insert:%", "func"),
+            ("\u00f7", "insert:\u00f7", "op"),
+        ],
+        [
+            ("7", "insert:7", "num"),
+            ("8", "insert:8", "num"),
+            ("9", "insert:9", "num"),
+            ("\u00d7", "insert:\u00d7", "op"),
+        ],
+        [
+            ("4", "insert:4", "num"),
+            ("5", "insert:5", "num"),
+            ("6", "insert:6", "num"),
+            ("\u2212", "insert:\u2212", "op"),
+        ],
+        [
+            ("1", "insert:1", "num"),
+            ("2", "insert:2", "num"),
+            ("3", "insert:3", "num"),
+            ("+", "insert:+", "op"),
+        ],
+        [
+            ("0", "insert:0", "num"),
+            (".", "insert:.", "num"),
+            ("A", "insert:A", "num"),
+            ("=", "equals", "equals"),
+        ],
     ]
 
     # ────────────────────────────────────────────────────────────
@@ -92,13 +152,15 @@ class CalculatorApp:
     def __init__(self, root: tk.Tk, engine=None):
         self._reload_result_display_config()
         self.root = root
-        self.root.title("Calculadora Cient\u00EDfica")
+        self.root.title("Calculadora Cient\u00edfica")
         self.root.configure(bg=self.C["bg"])
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._apply_window_icon()
 
-        self.engine = engine if engine is not None else ArbitraryPrecisionCalculatorEngine()
+        self.engine = (
+            engine if engine is not None else ArbitraryPrecisionCalculatorEngine()
+        )
         self._inv_mode = False
         self._last_engine_result: str | None = None
         self._history: list[tuple[str, str]] = []
@@ -106,7 +168,13 @@ class CalculatorApp:
         self._shift_copy = False
         self._ctrl_copy = False
         self._expr_inactive_after_result = False
-        self._background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="calculator")
+        # Contexto de continuación posresultado (Fase 5): solo se activa al
+        # confirmar el trabajo vigente y nunca se deriva de `has_answer()`,
+        # de la receta ANS ni del texto o color de ningún control.
+        self._valid_result_visible = False
+        self._background_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="calculator"
+        )
         self._background_futures = []
         self._background_job_seq = 0
         self._active_background_job_id = 0
@@ -142,7 +210,9 @@ class CalculatorApp:
         """
         if getattr(sys, "frozen", False):
             exe_dir = Path(sys.executable).parent
-            if (exe_dir / "icon-calculator.ico").exists() or (exe_dir / "icons").exists():
+            if (exe_dir / "icon-calculator.ico").exists() or (
+                exe_dir / "icons"
+            ).exists():
                 return exe_dir
         return Path(__file__).resolve().parent
 
@@ -156,11 +226,9 @@ class CalculatorApp:
         """
         base = self._icon_base_dir()
         ico_path = base / "icon-calculator.ico"
-        try:
-            if ico_path.exists():
+        if ico_path.exists():
+            with contextlib.suppress(tk.TclError):
                 self.root.iconbitmap(default=str(ico_path))
-        except tk.TclError:
-            pass
 
         icons_dir = base / "icons"
         png_sizes = (16, 24, 32, 48, 64, 128, 256)
@@ -176,20 +244,24 @@ class CalculatorApp:
         if photos:
             # Mantener referencias para que Tk no libere las imágenes.
             self._icon_photos = photos
-            try:
+            with contextlib.suppress(tk.TclError):
                 self.root.iconphoto(True, *photos)
-            except tk.TclError:
-                pass
 
     # ── Fuentes ──────────────────────────────────────────────────
 
     def _init_fonts(self):
-        self._f_expr   = tkfont.Font(family="Consolas", size=19)
+        self._f_expr = tkfont.Font(family="Consolas", size=19)
         self._f_result = tkfont.Font(family="Consolas", size=25, weight="bold")
-        self._f_btn    = tkfont.Font(family="Segoe UI", size=18)
-        self._f_func   = tkfont.Font(family="Segoe UI", size=14)
-        self._f_small  = tkfont.Font(family="Segoe UI", size=12)
-        self._base_font_sizes = {"expr": 19, "result": 25, "btn": 18, "func": 14, "small": 12}
+        self._f_btn = tkfont.Font(family="Segoe UI", size=18)
+        self._f_func = tkfont.Font(family="Segoe UI", size=14)
+        self._f_small = tkfont.Font(family="Segoe UI", size=12)
+        self._base_font_sizes = {
+            "expr": 19,
+            "result": 25,
+            "btn": 18,
+            "func": 14,
+            "small": 12,
+        }
 
     # ── Pantalla ─────────────────────────────────────────────────
 
@@ -200,11 +272,16 @@ class CalculatorApp:
         # Campo de expresión (editable)
         self.expr_var = tk.StringVar()
         self.expr_entry = tk.Entry(
-            frame, textvariable=self.expr_var,
-            font=self._f_expr, bg=self.C["display_bg"],
-            fg=self.C["expr_fg"], insertbackground=self.C["expr_fg"],
+            frame,
+            textvariable=self.expr_var,
+            font=self._f_expr,
+            bg=self.C["display_bg"],
+            fg=self.C["expr_fg"],
+            insertbackground=self.C["expr_fg"],
             readonlybackground=self.C["display_bg"],
-            relief="flat", justify="right", bd=0,
+            relief="flat",
+            justify="right",
+            bd=0,
         )
         self.expr_entry.bind("<Button-1>", self._on_expression_click)
         self.expr_entry.bind("<Key>", self._on_inactive_result_key)
@@ -218,17 +295,26 @@ class CalculatorApp:
         self.result_display = ResultDisplay(
             row,
             request_more_callback=self._request_more_precision,
-            font=self._f_result, bg=self.C["display_bg"],
+            font=self._f_result,
+            bg=self.C["display_bg"],
             fg=self.C["result_fg"],
             readonlybackground=self.C["display_bg"],
-            relief="flat", justify="right", bd=0,
+            relief="flat",
+            justify="right",
+            bd=0,
         )
 
         self._copy_btn = tk.Button(
-            row, text="Copiar", font=self._f_small,
-            bg=self.C["func"], fg=self.C["func_fg"],
-            activebackground=self.C["active"], relief="flat",
-            cursor="hand2", command=self._copy_result, padx=8,
+            row,
+            text="Copiar",
+            font=self._f_small,
+            bg=self.C["func"],
+            fg=self.C["func_fg"],
+            activebackground=self.C["active"],
+            relief="flat",
+            cursor="hand2",
+            command=self._copy_result,
+            padx=8,
         )
         self._copy_btn.bind("<Button-1>", self._on_copy_press)
         self._copy_btn.pack(side="right", padx=(6, 0))
@@ -243,7 +329,11 @@ class CalculatorApp:
         probe = tk.Entry(
             self._result_row,
             font=self._f_result,
-            width=getattr(self.result_display, "_base_entry_width_chars", ResultDisplay.VISIBLE_CHARS + 1),
+            width=getattr(
+                self.result_display,
+                "_base_entry_width_chars",
+                ResultDisplay.VISIBLE_CHARS + 1,
+            ),
             relief="flat",
             bd=0,
         )
@@ -263,34 +353,54 @@ class CalculatorApp:
         frame.pack(fill="x", padx=6, pady=(2, 2))
 
         self.angle_btn = tk.Button(
-            frame, text="RAD", font=self._f_small, width=6,
-            bg=self.C["toggle_on"], fg=self.C["bg"],
-            activebackground=self.C["toggle_on"], relief="flat",
+            frame,
+            text="RAD",
+            font=self._f_small,
+            width=6,
+            bg=self.C["toggle_on"],
+            fg=self.C["bg"],
+            activebackground=self.C["toggle_on"],
+            relief="flat",
             command=self._toggle_angle,
         )
         self.angle_btn.pack(side="left", padx=(0, 4))
 
         self.inv_btn = tk.Button(
-            frame, text="INV", font=self._f_small, width=6,
-            bg=self.C["toggle_off"], fg=self.C["special_fg"],
-            activebackground=self.C["toggle_off"], relief="flat",
+            frame,
+            text="INV",
+            font=self._f_small,
+            width=6,
+            bg=self.C["toggle_off"],
+            fg=self.C["special_fg"],
+            activebackground=self.C["toggle_off"],
+            relief="flat",
             command=self._toggle_inv,
         )
         self.inv_btn.pack(side="left")
 
         self._settings_btn = tk.Button(
-            frame, text="\u2699", font=self._f_small,
-            bg=self.C["toggle_off"], fg="#EBCB8B",
-            activebackground=self.C["active"], relief="flat",
-            cursor="hand2", command=self._open_settings,
+            frame,
+            text="\u2699",
+            font=self._f_small,
+            bg=self.C["toggle_off"],
+            fg="#EBCB8B",
+            activebackground=self.C["active"],
+            relief="flat",
+            cursor="hand2",
+            command=self._open_settings,
         )
         self._settings_btn.pack(side="right")
 
         self._history_btn = tk.Button(
-            frame, text="Historial", font=self._f_small,
-            bg=self.C["toggle_off"], fg=self.C["special_fg"],
-            activebackground=self.C["active"], relief="flat",
-            cursor="hand2", command=self._open_history,
+            frame,
+            text="Historial",
+            font=self._f_small,
+            bg=self.C["toggle_off"],
+            fg=self.C["special_fg"],
+            activebackground=self.C["active"],
+            relief="flat",
+            cursor="hand2",
+            command=self._open_history,
         )
         self._history_btn.pack(side="right", padx=(0, 4))
 
@@ -307,13 +417,16 @@ class CalculatorApp:
         for col, spec in enumerate(self.SCIENCE_BUTTONS):
             text_norm, ins_norm, _text_inv, _ins_inv = spec
             btn = tk.Button(
-                frame, text=text_norm, font=self._f_func,
-                bg=self.C["func"], fg=self.C["func_fg"],
-                activebackground=self.C["active"], relief="flat",
+                frame,
+                text=text_norm,
+                font=self._f_func,
+                bg=self.C["func"],
+                fg=self.C["func_fg"],
+                activebackground=self.C["active"],
+                relief="flat",
                 command=lambda c=col: self._on_science(c),
             )
-            btn.grid(row=0, column=col, sticky="nsew", padx=1, pady=1,
-                     ipady=0)
+            btn.grid(row=0, column=col, sticky="nsew", padx=1, pady=1, ipady=0)
             self._sci_buttons.append(btn)
 
     # ── Teclado numérico / operadores ────────────────────────────
@@ -322,34 +435,51 @@ class CalculatorApp:
         frame = tk.Frame(self.root, bg=self.C["bg"])
         frame.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
-        # 12 columnas lógicas: LCM(4, 6) → filas de 6 botones [2×6] y de 4 botones [3×4]
+        # 12 columnas lógicas: mcm(6, 4) → fila de 6 botones [2×6] y filas de 4 botones [3×4]
+        # (la última fila es 0, '.', 'A', '=' con el mismo reparto de 3×4)
         max_cols = 12
         for c in range(max_cols):
             frame.columnconfigure(c, weight=1, uniform="key")
 
+        # Referencias a los botones por acción para sincronizar su estado
+        # en fases posteriores (p. ej. disponibilidad del botón A según ANS).
+        self._keypad_buttons: dict[str, tk.Button] = {}
+
         for r, row_def in enumerate(self.KEYPAD):
-            cols_in_row = len(row_def)
-            # Última fila: 0 ocupa 2 espacios de botón, '.' y '=' ocupan 1 cada uno
-            if r == len(self.KEYPAD) - 1:
-                spans = [6, 3, 3]
-            else:
-                spans = self._compute_spans(cols_in_row, max_cols)
+            spans = self._compute_spans(len(row_def), max_cols)
             col_pos = 0
             for idx, (text, action, kind) in enumerate(row_def):
                 bg = self.C[kind]
                 fg = self.C[f"{kind}_fg"]
                 btn = tk.Button(
-                    frame, text=text, font=self._f_btn,
-                    bg=bg, fg=fg, activebackground=self.C["active"],
+                    frame,
+                    text=text,
+                    font=self._f_btn,
+                    bg=bg,
+                    fg=fg,
+                    activebackground=self.C["active"],
                     relief="flat",
                     command=lambda a=action: self._on_key(a),
                 )
-                btn.grid(row=r, column=col_pos, columnspan=spans[idx],
-                         sticky="nsew", padx=1, pady=1, ipady=0)
+                btn.grid(
+                    row=r,
+                    column=col_pos,
+                    columnspan=spans[idx],
+                    sticky="nsew",
+                    padx=1,
+                    pady=1,
+                    ipady=0,
+                )
+                self._keypad_buttons[action] = btn
                 col_pos += spans[idx]
 
         for r in range(len(self.KEYPAD)):
             frame.rowconfigure(r, weight=1)
+
+        # Referencia directa al botón de respuesta anterior (A). Se mantiene
+        # habilitado provisionalmente; la sincronización con el estado real
+        # de ANS se integrará en fases posteriores del plan.
+        self._answer_btn = self._keypad_buttons.get("insert:A")
 
     @staticmethod
     def _compute_spans(cols_in_row: int, max_cols: int) -> list[int]:
@@ -374,51 +504,62 @@ class CalculatorApp:
         return getattr(self, "_expr_inactive_after_result", False)
 
     def _set_expression_editable(self, editable: bool):
-        try:
+        with contextlib.suppress(tk.TclError):
             self.expr_entry.configure(state="normal" if editable else "readonly")
-        except tk.TclError:
-            pass
 
     def _focus_expression_if_editable(self):
         if self._expression_is_inactive():
-            try:
+            with contextlib.suppress(tk.TclError):
                 self.root.focus_set()
-            except tk.TclError:
-                pass
             return
         self.expr_entry.focus_set()
 
     def _deactivate_expression_after_result(self):
         self._expr_inactive_after_result = True
         self._set_expression_editable(False)
-        try:
+        with contextlib.suppress(tk.TclError):
             self.expr_entry.selection_clear()
-        except tk.TclError:
-            pass
-        try:
+        with contextlib.suppress(tk.TclError):
             self.root.focus_set()
-        except tk.TclError:
-            pass
 
     def _activate_expression_for_editing(self):
         if not self._expression_is_inactive():
             return
         self._expr_inactive_after_result = False
+        # Editar la expresión antigua (clic o historial) limpia el cálculo
+        # activo, cancela expansiones pendientes y desactiva la continuación
+        # automática; el ANS confirmado permanece (Fase 5).
+        self._valid_result_visible = False
+        self._next_background_job_id()
+        self._clear_engine_precision_state()
         self._set_expression_editable(True)
 
-    def _reset_for_new_formula(self):
+    def _reset_for_new_formula(self, *, preserve_answer_result: bool = False):
+        """Prepara una fórmula nueva y descarta el cálculo activo.
+
+        Una continuación automática con `A` conserva únicamente su valor
+        visible como referencia mientras se compone la fórmula. El cálculo
+        activo y su precisión se invalidan igual que en cualquier reinicio;
+        AC, borrado y entradas independientes siguen mostrando `0`.
+        """
         self._next_background_job_id()
         self._clear_engine_precision_state()
         self._activate_expression_for_editing()
         self.expr_var.set("")
-        self.result_display.set_text("0")
+        if not preserve_answer_result:
+            self.result_display.set_text("0")
         self.result_display.finish_loading_more()
         self.result_display.mark_precision_exhausted()
         self._last_engine_result = None
+        self._valid_result_visible = False
 
-    def _begin_new_formula_from_inactive_result(self):
+    def _begin_new_formula_from_inactive_result(
+        self, *, preserve_answer_result: bool = False
+    ):
         if self._expression_is_inactive():
-            self._reset_for_new_formula()
+            self._reset_for_new_formula(
+                preserve_answer_result=preserve_answer_result
+            )
 
     def _on_expression_click(self, _event):
         self._activate_expression_for_editing()
@@ -441,8 +582,20 @@ class CalculatorApp:
         if not char or not char.isprintable() or char.isspace():
             return None
 
-        self._begin_new_formula_from_inactive_result()
-        self._insert_at_cursor(char)
+        # Teclado físico: solo los disparadores cerrados anteponen `A` tras
+        # un resultado válido visible; cualquier otro carácter imprimible
+        # empieza una fórmula independiente (sección 3.2 del plan ANS).
+        text = char
+        is_answer_continuation = (
+            self._valid_result_visible
+            and char in _PHYSICAL_RESULT_CONTINUATION_KEYS
+        )
+        if is_answer_continuation:
+            text = "A" + char
+        self._begin_new_formula_from_inactive_result(
+            preserve_answer_result=is_answer_continuation
+        )
+        self._insert_at_cursor(text)
         self._focus_expression_if_editable()
         return "break"
 
@@ -527,10 +680,8 @@ class CalculatorApp:
                 return
             callback()
 
-        try:
+        with contextlib.suppress(tk.TclError):
             self.root.after(0, _run_if_valid)
-        except tk.TclError:
-            pass
 
     def _cancel_pending_background_jobs(self):
         active_futures = []
@@ -551,7 +702,9 @@ class CalculatorApp:
             future = self._background_executor.submit(fn)
         except RuntimeError:
             return False
-        self._background_futures = [tracked for tracked in self._background_futures if not tracked.done()]
+        self._background_futures = [
+            tracked for tracked in self._background_futures if not tracked.done()
+        ]
         self._background_futures.append(future)
         return True
 
@@ -576,23 +729,35 @@ class CalculatorApp:
             cur = self.expr_var.get()
             pos = self.expr_entry.index(tk.INSERT)
             if pos > 0:
-                self.expr_var.set(cur[:pos - 1] + cur[pos:])
+                self.expr_var.set(cur[: pos - 1] + cur[pos:])
                 self.expr_entry.icursor(pos - 1)
         elif action == "equals":
             self._calculate()
         elif action.startswith("insert:"):
-            self._begin_new_formula_from_inactive_result()
-            text = action[7:]
+            # La plantilla se resuelve ANTES de consumir el contexto: con un
+            # resultado válido visible, operadores y postfijos construyen la
+            # continuación con `A` (sección 3.2 del plan ANS). En ese único
+            # caso el valor visible de A permanece hasta confirmar la fórmula.
+            is_answer_continuation = (
+                self._valid_result_visible
+                and action in _RESULT_CONTINUATION_TEMPLATES
+            )
+            text = self._resolve_button_insertion(action)
+            self._begin_new_formula_from_inactive_result(
+                preserve_answer_result=is_answer_continuation
+            )
             self._insert_at_cursor(text)
         self._focus_expression_if_editable()
 
     def _on_science(self, col: int):
-        self._begin_new_formula_from_inactive_result()
-        spec = self.SCIENCE_BUTTONS[col]
-        if self._inv_mode:
-            text_to_insert = spec[3]   # ins_inv
-        else:
-            text_to_insert = spec[1]   # ins_norm
+        is_answer_continuation = (
+            self._valid_result_visible
+            and (col, self._inv_mode) in _SCIENCE_RESULT_TEMPLATES
+        )
+        text_to_insert = self._science_button_insertion(col)
+        self._begin_new_formula_from_inactive_result(
+            preserve_answer_result=is_answer_continuation
+        )
         self._insert_at_cursor(text_to_insert)
         self._focus_expression_if_editable()
 
@@ -603,17 +768,48 @@ class CalculatorApp:
         self.expr_entry.icursor(pos + len(text))
         self.expr_entry.xview(tk.INSERT)
 
+    # ── Continuación posresultado con `A` (Fase 5) ──────────────
+
+    def _resolve_button_insertion(self, action: str) -> str:
+        """Texto que inserta un botón del teclado según la pantalla.
+
+        Con un resultado válido visible, los operadores binarios y los
+        postfijos construyen la continuación con `A` de la sección 3.2 del
+        plan; el botón `A` es una referencia manual que nunca se duplica;
+        dígitos, `.`, `π`, `e` y agrupadores empiezan una fórmula
+        independiente con su inserción normal. Con pantalla limpia o fórmula
+        activa, todo botón se comporta como siempre aunque el motor tenga
+        ANS en memoria.
+        """
+        text = action[7:]
+        if not self._valid_result_visible or action == "insert:A":
+            return text
+        return _RESULT_CONTINUATION_TEMPLATES.get(action, text)
+
+    def _science_button_insertion(self, col: int) -> str:
+        """Texto que inserta un botón científico según la pantalla.
+
+        Con un resultado válido visible, cada botón —normal o INV— aplica su
+        plantilla posresultado (`√(A)`, `sin(A)`, `A^(2)`, `exp(A)`, ...);
+        en cualquier otro caso inserta su plantilla vacía habitual aunque el
+        motor tenga ANS en memoria.
+        """
+        if self._valid_result_visible:
+            template = _SCIENCE_RESULT_TEMPLATES.get((col, self._inv_mode))
+            if template is not None:
+                return template
+        spec = self.SCIENCE_BUTTONS[col]
+        return spec[3] if self._inv_mode else spec[1]
+
     # ── Toggles ──────────────────────────────────────────────────
 
     def _toggle_angle(self):
         if self.engine.angle_mode == "rad":
             self.engine.angle_mode = "deg"
-            self.angle_btn.config(text="DEG", bg=self.C["op"],
-                                  fg=self.C["op_fg"])
+            self.angle_btn.config(text="DEG", bg=self.C["op"], fg=self.C["op_fg"])
         else:
             self.engine.angle_mode = "rad"
-            self.angle_btn.config(text="RAD", bg=self.C["toggle_on"],
-                                  fg=self.C["bg"])
+            self.angle_btn.config(text="RAD", bg=self.C["toggle_on"], fg=self.C["bg"])
         self._focus_expression_if_editable()
 
     def _toggle_inv(self):
@@ -623,8 +819,7 @@ class CalculatorApp:
             for col, spec in enumerate(self.SCIENCE_BUTTONS):
                 self._sci_buttons[col].config(text=spec[2])
         else:
-            self.inv_btn.config(bg=self.C["toggle_off"],
-                                fg=self.C["special_fg"])
+            self.inv_btn.config(bg=self.C["toggle_off"], fg=self.C["special_fg"])
             for col, spec in enumerate(self.SCIENCE_BUTTONS):
                 self._sci_buttons[col].config(text=spec[0])
         self._focus_expression_if_editable()
@@ -637,6 +832,12 @@ class CalculatorApp:
     # ── Historial ─────────────────────────────────────────────────
 
     def _open_history(self):
+        """Abre (o trae al frente) la ventana de historial.
+
+        La ventana comparte `self._history` (tuplas simples) y recibe los
+        callbacks de reutilización y cálculo; ver `_reuse_history_expr`
+        para la semántica contextual del doble clic (Fase 6).
+        """
         if self._history_window is not None and self._history_window.is_open():
             self._history_window.refresh()
             self._history_window.lift()
@@ -649,16 +850,33 @@ class CalculatorApp:
         )
 
     def _reuse_history_expr(self, expr: str):
+        """Coloca una expresión del historial y deja listo su recálculo.
+
+        El doble clic del historial invoca esto antes de `_calculate()`, de
+        modo que la solicitud se crea después de colocar la expresión y
+        captura el ANS confirmado en ese instante —o el cero por defecto si
+        aún no existe receta—. Una expresión con `A` se recalcula con el
+        ANS actual, por lo que el resultado puede diferir del guardado en
+        la entrada histórica (Fase 6). Como `_activate_expression_for_editing`,
+        reutilizar del historial limpia el cálculo activo y cancela
+        expansiones pendientes conservando el ANS.
+        """
         self._activate_expression_for_editing()
         self.expr_var.set(expr)
         self.expr_entry.icursor(tk.END)
         self.expr_entry.focus_set()
 
     def _add_to_history(self, expr: str, result: str):
+        """Registra (expresión, resultado) con deduplicación por expresión.
+
+        `self._history` sigue siendo `list[tuple[str, str]]`: nunca guarda
+        recetas ni valores ocultos (Fase 6). Una nueva evaluación de la
+        misma fórmula reemplaza su entrada anterior por el resultado más
+        reciente; la expresión se almacena literal, con `A` incluida.
+        """
         normalized_expr = expr.replace(" ", "")
         self._history[:] = [
-            item for item in self._history
-            if item[0] != normalized_expr
+            item for item in self._history if item[0] != normalized_expr
         ]
         self._history.append((normalized_expr, result))
         if self._history_window is not None and self._history_window.is_open():
@@ -669,6 +887,16 @@ class CalculatorApp:
         ResultDisplay.DECIMAL_SEPARATOR = get_decimal_separator_enabled()
 
     def restart_ui_after_config_change(self):
+        """Reconstruye la interfaz tras un cambio de configuración.
+
+        Conserva el motor —y con él la respuesta ANS confirmada— y el
+        historial (Fase 6); limpia solo el cálculo activo, el contexto de
+        continuación posresultado y los trabajos pendientes. La pantalla
+        reconstruida queda limpia: aunque la memoria sobreviva, no se
+        reactiva la inserción automática de `A`, y el botón `A` se
+        reconstruye habilitado. Una instancia nueva del motor arrancaría
+        sin receta ANS, con `A = 0`.
+        """
         if getattr(self, "_closing", False):
             return
 
@@ -677,22 +905,17 @@ class CalculatorApp:
         self._next_background_job_id()
         self._clear_engine_precision_state()
 
-        try:
+        with contextlib.suppress(tk.TclError):
             self.root.state("normal")
-        except tk.TclError:
-            pass
 
-        if getattr(self, "_resize_pending", None) is not None:
-            try:
-                self.root.after_cancel(self._resize_pending)
-            except tk.TclError:
-                pass
+        pending_after_id = getattr(self, "_resize_pending", None)
+        if pending_after_id is not None:
+            with contextlib.suppress(tk.TclError):
+                self.root.after_cancel(pending_after_id)
             self._resize_pending = None
 
-        try:
+        with contextlib.suppress(AttributeError, RuntimeError):
             self._background_executor.shutdown(wait=False, cancel_futures=True)
-        except (AttributeError, RuntimeError):
-            pass
         self._background_futures = []
 
         for child in self.root.winfo_children():
@@ -710,31 +933,56 @@ class CalculatorApp:
 
         job_id = self._next_background_job_id()
         self.result_display.finish_loading_more()
+        # Solicitud inmutable creada en el hilo de UI antes del envío:
+        # captura ANS (o el fallback 0), modo angular y revisiones exactos.
+        request = self.engine.create_evaluation_request(expr)
 
         def _run():
+            # Fase pura: el worker valida, compila y evalúa sin mutar el motor.
             try:
-                result = self.engine.evaluate(expr)
+                candidate = self.engine.evaluate_request(request)
+            except (
+                ValueError,
+                ZeroDivisionError,
+                OverflowError,
+                ArithmeticError,
+                TypeError,
+            ) as exc:
+                error_name = type(exc).__name__
+                msg = str(exc) if str(exc) else error_name
 
-                def _apply_result():
+                def _apply_error():
+                    # Error vigente: limpia solo el cálculo activo y el
+                    # contexto de continuación; ANS (o el fallback 0) queda.
+                    self._clear_engine_precision_state()
+                    self._last_engine_result = None
+                    self.result_display.set_text(f"Error: {msg}")
+                    self.result_display.mark_precision_exhausted()
+                    self._valid_result_visible = False
+
+                self._schedule_on_ui_thread(_apply_error, job_id=job_id)
+            else:
+
+                def _apply_candidate():
+                    try:
+                        result = self.engine.commit_evaluation(candidate)
+                    except ValueError:
+                        # Candidato obsoleto a nivel de motor: un trabajo
+                        # viejo nunca toca ANS, pantalla ni historial.
+                        return
+                    # Único punto que actualiza resultado, disponibilidad de
+                    # precisión, historial y estado de la expresión; solo una
+                    # confirmación correcta habilita el resultado visible.
                     self._last_engine_result = result
                     self.result_display.set_text(result)
                     self._sync_result_precision_availability()
                     self._add_to_history(expr, result)
                     self._deactivate_expression_after_result()
+                    # Único punto que habilita la continuación posresultado:
+                    # el resultado válido queda visible en pantalla (Fase 5).
+                    self._valid_result_visible = True
 
-                self._schedule_on_ui_thread(_apply_result, job_id=job_id)
-            except (ValueError, ZeroDivisionError, OverflowError,
-                    ArithmeticError, TypeError) as exc:
-                error_name = type(exc).__name__
-                msg = str(exc) if str(exc) else error_name
-
-                def _apply_error():
-                    self._clear_engine_precision_state()
-                    self._last_engine_result = None
-                    self.result_display.set_text(f"Error: {msg}")
-                    self.result_display.mark_precision_exhausted()
-
-                self._schedule_on_ui_thread(_apply_error, job_id=job_id)
+                self._schedule_on_ui_thread(_apply_candidate, job_id=job_id)
 
         self._submit_background(_run)
 
@@ -742,7 +990,7 @@ class CalculatorApp:
 
     def _on_copy_press(self, event):
         self._shift_copy = bool(event.state & 0x1)  # bit 0 = Shift
-        self._ctrl_copy = bool(event.state & 0x4)   # bit 2 = Ctrl
+        self._ctrl_copy = bool(event.state & 0x4)  # bit 2 = Ctrl
 
     def _copy_result(self):
         standard_scientific = self._ctrl_copy
@@ -765,34 +1013,61 @@ class CalculatorApp:
 
         job_id = self._next_background_job_id()
 
+        try:
+            # Solicitud inmutable capturada en el hilo de UI antes del envío.
+            request = self.engine.create_precision_request()
+        except (
+            ValueError,
+            ZeroDivisionError,
+            OverflowError,
+            ArithmeticError,
+            TypeError,
+        ):
+            # Sin cálculo ampliable: ANS intacto y sin carga bloqueada.
+            self.result_display.mark_precision_exhausted()
+            self.result_display.finish_loading_more()
+            return
+
         def _run():
+            # Fase pura: reevalúa la cadena completa sin mutar el motor.
             try:
-                updated = self.engine.request_more_precision()
-                if self._last_engine_result is not None and updated == self._last_engine_result:
-                    self._schedule_on_ui_thread(
-                        self.result_display.mark_precision_exhausted,
-                        job_id=job_id,
-                    )
-                    return
+                candidate = self.engine.evaluate_precision_request(request)
+            except (
+                ValueError,
+                ZeroDivisionError,
+                OverflowError,
+                ArithmeticError,
+                TypeError,
+            ):
 
-                def _apply_updated_result():
+                def _apply_precision_error():
+                    self.result_display.mark_precision_exhausted()
+
+                self._schedule_on_ui_thread(_apply_precision_error, job_id=job_id)
+            else:
+
+                def _apply_expanded():
+                    try:
+                        updated = self.engine.commit_precision(candidate)
+                    except ValueError:
+                        # Expansión obsoleta a nivel de motor: sin cambios
+                        # de valor, dígitos, scroll ni estado de carga.
+                        return
+                    if (
+                        self._last_engine_result is not None
+                        and updated == self._last_engine_result
+                    ):
+                        self.result_display.mark_precision_exhausted()
+                        return
+                    # La confirmación de una expansión actualiza solo el
+                    # texto y el valor activos; la receta ANS ya es la misma.
                     self._last_engine_result = updated
-                    self.result_display.set_text(
-                        updated,
-                        preserve_view=True,
-                    )
+                    self.result_display.set_text(updated, preserve_view=True)
 
-                self._schedule_on_ui_thread(_apply_updated_result, job_id=job_id)
-            except (ValueError, ZeroDivisionError, OverflowError,
-                    ArithmeticError, TypeError):
-                self._schedule_on_ui_thread(
-                    self.result_display.mark_precision_exhausted,
-                    job_id=job_id,
-                )
+                self._schedule_on_ui_thread(_apply_expanded, job_id=job_id)
             finally:
                 self._schedule_on_ui_thread(
-                    self.result_display.finish_loading_more,
-                    job_id=job_id,
+                    self.result_display.finish_loading_more, job_id=job_id
                 )
 
         submitted = self._submit_background(_run)

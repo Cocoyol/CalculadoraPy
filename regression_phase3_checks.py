@@ -1,4 +1,4 @@
-from mpmath import mp
+from typing import Any
 
 from arbitrary_precision_engine import ArbitraryPrecisionCalculatorEngine
 from calculator_ui_window import CalculatorApp
@@ -44,7 +44,9 @@ class _Harness:
         self._background_job_seq = 0
         self._active_background_job_id = 0
         self._closing = False
-        self._background_executor = None
+        # Los arneses simulan CalculatorApp con fakes; Any evita que el
+        # verificador de tipos objete los ejecutores de prueba intercambiables.
+        self._background_executor: Any = None
 
 
 def _assert(condition: bool, message: str):
@@ -61,7 +63,9 @@ def check_terminal_values_do_not_expand_precision() -> None:
     ]
 
     for expression, expected_message in cases:
-        engine = ArbitraryPrecisionCalculatorEngine(initial_digits=18, precision_step=24)
+        engine = ArbitraryPrecisionCalculatorEngine(
+            initial_digits=18, precision_step=24
+        )
         engine.evaluate(expression)
 
         _assert(
@@ -83,13 +87,15 @@ def check_terminal_values_do_not_expand_precision() -> None:
     engine.evaluate("1/3")
     _assert(engine.can_expand_precision(), "1/3 debe seguir expandiendo precisión")
 
-    engine._last_expression = "nan"
-    engine._last_value = mp.nan
+    # NaN a través de la API pública (inf - inf), sin tocar estado privado.
+    engine.evaluate("0*ln(0)")
     _assert(not engine.can_expand_precision(), "NaN no debe expandir precisión")
 
 
 def check_large_mpf_values_keep_expanding_precision() -> None:
-    integer_like = ArbitraryPrecisionCalculatorEngine(initial_digits=120, precision_step=120)
+    integer_like = ArbitraryPrecisionCalculatorEngine(
+        initial_digits=120, precision_step=120
+    )
     first = integer_like.evaluate("120!+20^30")
 
     _assert(
@@ -98,13 +104,17 @@ def check_large_mpf_values_keep_expanding_precision() -> None:
     )
     second = integer_like.request_more_precision()
     _assert(second != first, "la expansion del entero grande no cambio el texto")
-    _assert(len(second) > len(first), "la expansion del entero grande no agrego digitos")
+    _assert(
+        len(second) > len(first), "la expansion del entero grande no agrego digitos"
+    )
     _assert(
         not integer_like.can_expand_precision(),
         "el entero grande completo debe quedar terminal tras cubrir sus digitos",
     )
 
-    non_integer = ArbitraryPrecisionCalculatorEngine(initial_digits=120, precision_step=120)
+    non_integer = ArbitraryPrecisionCalculatorEngine(
+        initial_digits=120, precision_step=120
+    )
     first = non_integer.evaluate("121.7^147.9")
 
     _assert(
@@ -116,7 +126,9 @@ def check_large_mpf_values_keep_expanding_precision() -> None:
 
     _assert(second != first, "la primera expansion no agrego digitos")
     _assert(third != second, "la segunda expansion no agrego digitos")
-    _assert(non_integer.can_expand_precision(), "el mpf no entero debe seguir expandiendo")
+    _assert(
+        non_integer.can_expand_precision(), "el mpf no entero debe seguir expandiendo"
+    )
 
 
 def check_new_job_id_cancels_pending_futures() -> None:
@@ -127,14 +139,19 @@ def check_new_job_id_cancels_pending_futures() -> None:
     harness = _Harness()
     harness._background_futures = [running, pending, done]
 
-    job_id = CalculatorApp._next_background_job_id(harness)
+    job_id = CalculatorApp._next_background_job_id(harness)  # type: ignore[arg-type]
 
     _assert(job_id == 1, f"job_id inesperado: {job_id}")
     _assert(not running.cancelled, "no debe cancelarse un future en ejecución")
-    _assert(running.cancel_calls == 0, "no debe intentarse cancelar un future en ejecución")
+    _assert(
+        running.cancel_calls == 0, "no debe intentarse cancelar un future en ejecución"
+    )
     _assert(pending.cancelled, "faltó cancelar el future pendiente")
     _assert(pending.cancel_calls == 1, "el future pendiente debe cancelarse una vez")
-    _assert(harness._background_futures == [running], "solo debe conservarse el future en ejecución")
+    _assert(
+        harness._background_futures == [running],
+        "solo debe conservarse el future en ejecución",
+    )
 
 
 def check_submit_background_tracks_latest_future() -> None:
@@ -145,19 +162,34 @@ def check_submit_background_tracks_latest_future() -> None:
     harness._background_futures = [finished]
     harness._background_executor = _FakeExecutor(latest)
 
-    submitted = CalculatorApp._submit_background(harness, lambda: None)
+    submitted = CalculatorApp._submit_background(harness, lambda: None)  # type: ignore[arg-type]
 
     _assert(submitted, "_submit_background debio aceptar el future nuevo")
-    _assert(harness._background_executor.submit_calls == 1, "faltó enviar el trabajo al executor")
-    _assert(harness._background_futures == [latest], "el seguimiento de futures debe podar los ya finalizados")
+    _assert(
+        harness._background_executor.submit_calls == 1,
+        "faltó enviar el trabajo al executor",
+    )
+    _assert(
+        harness._background_futures == [latest],
+        "el seguimiento de futures debe podar los ya finalizados",
+    )
 
 
 def run_regressions() -> None:
     checks = [
-        ("terminal values block precision expansion", check_terminal_values_do_not_expand_precision),
-        ("large mpf values keep precision expansion", check_large_mpf_values_keep_expanding_precision),
+        (
+            "terminal values block precision expansion",
+            check_terminal_values_do_not_expand_precision,
+        ),
+        (
+            "large mpf values keep precision expansion",
+            check_large_mpf_values_keep_expanding_precision,
+        ),
         ("new job id cancels queued futures", check_new_job_id_cancels_pending_futures),
-        ("submit background tracks latest future", check_submit_background_tracks_latest_future),
+        (
+            "submit background tracks latest future",
+            check_submit_background_tracks_latest_future,
+        ),
     ]
 
     for label, check in checks:

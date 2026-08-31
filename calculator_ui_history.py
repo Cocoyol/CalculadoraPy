@@ -1,17 +1,33 @@
 """
 Ventana flotante de historial de cálculos.
 
-Muestra las operaciones realizadas y permite reutilizar expresiones
+Muestra las operaciones realizadas y permite recalcular sus expresiones
 con doble clic. Es una ventana Toplevel independiente no modal que no
 bloquea el funcionamiento de la calculadora.
+
+Las entradas son tuplas simples (expresión, resultado) que nunca retienen
+recetas ni valores ocultos (Fase 6 del plan ANS): al recalcular una
+expresión con doble clic se captura la respuesta ANS confirmada en ese
+instante —o el cero por defecto si aún no existe—, por lo que el resultado
+puede diferir del que aparece en la entrada seleccionada.
 """
 
 import tkinter as tk
 from tkinter import font as tkfont
 
+# Texto explicativo del pie de ventana: comunica el carácter contextual
+# del historial (sección 3.2, decisión 10 y Fase 6 del plan ANS).
+_HINT_TEXT = "Doble clic para recalcular; A usa la respuesta actual (0 si aún no existe)"
+
 
 class HistoryWindow:
-    """Ventana flotante no modal con el historial de cálculos."""
+    """Ventana flotante no modal con el historial de cálculos.
+
+    El doble clic coloca la expresión de la entrada y lanza su recálculo:
+    `on_reuse` coloca la expresión y `on_calculate` la evalúa con la
+    respuesta ANS vigente en ese instante (o `0` si aún no existe), nunca
+    con el ANS de la época en que se creó la entrada histórica.
+    """
 
     C = {
         "bg":         "#1E1E2E",
@@ -40,8 +56,10 @@ class HistoryWindow:
         """
         parent       : ventana raíz de la calculadora.
         history      : lista mutable de tuplas (expresión, resultado).
-        on_reuse     : callback(expr: str) invocado al hacer doble clic.
-        on_calculate : callback() invocado tras on_reuse para ejecutar el cálculo.
+        on_reuse     : callback(expr: str) invocado al hacer doble clic;
+                       coloca la expresión antes de crear la solicitud.
+        on_calculate : callback() invocado tras on_reuse para ejecutar el
+                       cálculo, que captura el ANS confirmado en ese instante.
         """
         self._history_ref = history
         self._on_reuse = on_reuse
@@ -131,13 +149,18 @@ class HistoryWindow:
         self._text.bind("<Control-C>",       self._on_copy)
 
         # ── Pie de página ──
-        tk.Label(
+        # La ayuda explica el recálculo contextual: una expresión con `A`
+        # se recalcula con la respuesta actual (o con 0 si aún no existe).
+        self._hint_label = tk.Label(
             self._win,
-            text="Doble clic para reutilizar la expresión",
+            text=_HINT_TEXT,
             font=self._f_hint,
             bg=self.C["bg"],
             fg=self.C["hint_fg"],
-        ).pack(pady=(0, 8))
+            wraplength=340,
+            justify="center",
+        )
+        self._hint_label.pack(pady=(0, 8))
 
     # ── Ayudantes de geometría ────────────────────────────────────
 
@@ -192,6 +215,13 @@ class HistoryWindow:
         return "break"
 
     def _on_double_click(self, event):
+        """Recalcula la entrada seleccionada con el ANS vigente.
+
+        Primero coloca la expresión (`on_reuse`) y después lanza el cálculo
+        (`on_calculate`); la solicitud se crea tras colocar la expresión, de
+        modo que captura la respuesta confirmada en ese instante. El
+        resultado puede diferir del guardado en la entrada.
+        """
         idx = self._idx_from_event(event)
         if idx is None:
             return "break"
@@ -204,7 +234,11 @@ class HistoryWindow:
         return "break"
 
     def _on_copy(self, _event):
-        """Copia al portapapeles solo la expresión de la entrada seleccionada."""
+        """Copia al portapapeles solo la expresión literal de la entrada.
+
+        Se copia el texto con `A` tal cual, sin sustituirlo por ningún
+        número (Fase 6 del plan ANS).
+        """
         if self._selected_idx is None:
             return "break"
         expr = self._entries[self._selected_idx][0]
@@ -213,6 +247,11 @@ class HistoryWindow:
         return "break"
 
     def _on_clear(self):
+        """Vacía el historial compartido; nunca toca la respuesta ANS.
+
+        Solo se eliminan las tuplas (expresión, resultado): la respuesta
+        confirmada del motor y el cálculo activo permanecen intactos.
+        """
         self._history_ref.clear()
         self._entries = []
         self._selected_idx = None
