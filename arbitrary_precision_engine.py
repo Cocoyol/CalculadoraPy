@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from types import CodeType
 from typing import Any
 
-from formula_evaluator import FormulaEvaluator
+from formula_evaluator import ExpressionPositionError, FormulaEvaluator
 
 try:
     from mpmath import mp
@@ -26,10 +26,18 @@ except ImportError as exc:  # pragma: no cover
 _ANSWER_VALUE_ABSENT = object()
 
 
+class ExpressionSyntaxError(ExpressionPositionError):
+    """Error sintáctico con posición cero-basada en la fórmula visible."""
+
+    def __init__(self, position: int):
+        super().__init__("Error de sintaxis", position)
+
+
 @dataclass(frozen=True, slots=True)
 class CalculationRecipe:
     """Receta inmutable y reevaluable de un cálculo (sección 4.1 del plan ANS).
 
+    `source_positions` traduce cada carácter preparado a la fórmula visible.
     `uses_answer` se detecta sobre el nombre compilado exacto (`"A"` en
     `co_names`), nunca buscando la letra dentro del texto. `answer_dependency`
     es `None` tanto para expresiones independientes como para la raíz que usó
@@ -40,6 +48,7 @@ class CalculationRecipe:
     source_expression: str
     prepared_expression: str
     compiled_expression: CodeType
+    source_positions: tuple[int, ...]
     angle_mode: str
     uses_answer: bool
     answer_dependency: CalculationRecipe | None
@@ -312,12 +321,15 @@ class ArbitraryPrecisionCalculatorEngine:
         solicitud, por lo que una confirmación ajena posterior no puede
         cambiarla.
         """
-        prepared, compiled = self._compile_expression(request.expression)
+        prepared, compiled, source_positions = (
+            self._compile_expression_with_source_map(request.expression)
+        )
         uses_answer = "A" in compiled.co_names
         recipe = CalculationRecipe(
             source_expression=request.expression,
             prepared_expression=prepared,
             compiled_expression=compiled,
+            source_positions=source_positions,
             angle_mode=request.angle_mode,
             uses_answer=uses_answer,
             answer_dependency=request.answer_recipe if uses_answer else None,
@@ -489,19 +501,79 @@ class ArbitraryPrecisionCalculatorEngine:
                     angle_mode=node.angle_mode,
                     answer_value=answer_value,
                 )
-                value = self._eval_compiled_in_namespace(
-                    node.compiled_expression, namespace
-                )
+                value = self._eval_recipe_in_namespace(node, namespace)
             return value
 
-    @staticmethod
-    def _eval_compiled_in_namespace(compiled_expression, namespace) -> Any:
+    @classmethod
+    def _eval_recipe_in_namespace(
+        cls,
+        recipe: CalculationRecipe,
+        namespace: dict,
+    ) -> Any:
         try:
-            return eval(compiled_expression, {"__builtins__": {}}, namespace)
+            return eval(
+                recipe.compiled_expression,
+                {"__builtins__": {}},
+                namespace,
+            )
         except SyntaxError as exc:
-            raise ValueError("Error de sintaxis") from exc
+            position = cls._runtime_error_source_position(exc, recipe)
+            positioned_error = ExpressionSyntaxError(
+                len(recipe.source_expression) if position is None else position
+            )
+            positioned_error.source_expression = recipe.source_expression
+            raise positioned_error from exc
         except NameError as exc:
-            raise ValueError(f"Desconocido: {exc}") from exc
+            position = cls._runtime_error_source_position(exc, recipe)
+            if position is None:
+                raise ValueError(f"Desconocido: {exc}") from exc
+            positioned_error = ExpressionPositionError(
+                f"Desconocido: {exc}",
+                position,
+            )
+            positioned_error.source_expression = recipe.source_expression
+            raise positioned_error from exc
+        except (ValueError, ArithmeticError, TypeError) as exc:
+            position = cls._runtime_error_source_position(exc, recipe)
+            if position is not None and getattr(exc, "position", None) is None:
+                try:
+                    exc.position = position
+                    exc.source_expression = recipe.source_expression
+                except (AttributeError, TypeError):
+                    pass
+            raise
+
+    @staticmethod
+    def _runtime_error_source_position(
+        error: BaseException,
+        recipe: CalculationRecipe,
+    ) -> int | None:
+        traceback = error.__traceback__
+        while traceback is not None:
+            if traceback.tb_frame.f_code is recipe.compiled_expression:
+                code_positions = list(recipe.compiled_expression.co_positions())
+                code_index = traceback.tb_lasti // 2
+                if not 0 <= code_index < len(code_positions):
+                    return None
+                line, _end_line, column, _end_column = code_positions[code_index]
+                if line is None or column is None or line <= 0:
+                    return None
+
+                lines = recipe.prepared_expression.splitlines(keepends=True)
+                if line > len(lines):
+                    return None
+                prepared_index = sum(len(text) for text in lines[: line - 1]) + column
+                if prepared_index >= len(recipe.source_positions):
+                    return len(recipe.source_expression)
+                return max(
+                    0,
+                    min(
+                        recipe.source_positions[prepared_index],
+                        len(recipe.source_expression),
+                    ),
+                )
+            traceback = traceback.tb_next
+        return None
 
     @staticmethod
     def _is_complex_value(value) -> bool:
@@ -574,32 +646,159 @@ class ArbitraryPrecisionCalculatorEngine:
         return self._promote_numeric_literals(processed)
 
     def _compile_expression(self, expression: str):
-        try:
-            prepared = self._prepare_expression(expression)
-            compiled = compile(prepared, "<calculator>", "eval")
-        except (SyntaxError, IndentationError, tokenize.TokenError) as exc:
-            raise ValueError("Error de sintaxis") from exc
+        prepared, compiled, _source_positions = (
+            self._compile_expression_with_source_map(expression)
+        )
         return prepared, compiled
+
+    def _compile_expression_with_source_map(self, expression: str):
+        processed, source_positions = self._evaluator.prepare_with_source_map(
+            expression
+        )
+        try:
+            prepared, prepared_positions = (
+                self._promote_numeric_literals_with_source_map(
+                    processed,
+                    source_positions,
+                    source_length=len(expression),
+                )
+            )
+        except tokenize.TokenError as exc:
+            position = self._source_position_from_token_error(
+                expression,
+                processed,
+                source_positions,
+            )
+            raise ExpressionSyntaxError(position) from exc
+
+        try:
+            compiled = compile(prepared, "<calculator>", "eval")
+        except (SyntaxError, IndentationError) as exc:
+            position = self._source_position_from_syntax_error(
+                expression,
+                prepared_positions,
+                exc,
+            )
+            raise ExpressionSyntaxError(position) from exc
+        return prepared, compiled, prepared_positions
+
+    @staticmethod
+    def _source_position_from_syntax_error(
+        expression: str,
+        source_positions: tuple[int, ...],
+        error: SyntaxError,
+    ) -> int:
+        offset = getattr(error, "offset", None)
+        if not isinstance(offset, int) or offset <= 0:
+            return len(expression)
+
+        prepared_index = offset - 1
+        if prepared_index >= len(source_positions):
+            return len(expression)
+        return max(0, min(source_positions[prepared_index], len(expression)))
+
+    @staticmethod
+    def _source_position_from_token_error(
+        expression: str,
+        processed: str,
+        source_positions: tuple[int, ...],
+    ) -> int:
+        open_parentheses: list[int] = []
+        for index, char in enumerate(processed):
+            if char == "(":
+                open_parentheses.append(index)
+            elif char == ")" and open_parentheses:
+                open_parentheses.pop()
+
+        if open_parentheses:
+            processed_index = open_parentheses[0]
+            return max(
+                0,
+                min(source_positions[processed_index], len(expression)),
+            )
+        return len(expression)
 
     @staticmethod
     def _promote_numeric_literals(expression: str) -> str:
-        tokens = []
+        promoted, _source_positions = (
+            ArbitraryPrecisionCalculatorEngine._promote_numeric_literals_with_source_map(
+                expression,
+                tuple(range(len(expression))),
+                source_length=len(expression),
+            )
+        )
+        return promoted
+
+    @staticmethod
+    def _promote_numeric_literals_with_source_map(
+        expression: str,
+        source_positions: tuple[int, ...],
+        *,
+        source_length: int,
+    ) -> tuple[str, tuple[int, ...]]:
+        """Promueve números a ``mpf`` sin perder su posición de origen."""
+        line_offsets = [0]
+        for match in re.finditer(r"\n", expression):
+            line_offsets.append(match.end())
+
+        def absolute_index(row: int, column: int) -> int:
+            line_index = row - 1
+            if line_index >= len(line_offsets):
+                return len(expression)
+            return min(line_offsets[line_index] + column, len(expression))
+
+        parts: list[str] = []
+        promoted_positions: list[int] = []
         stream = io.StringIO(expression)
         previous_token_text = ""
+        cursor = 0
 
         for tok in tokenize.generate_tokens(stream.readline):
+            start = absolute_index(*tok.start)
+            end = absolute_index(*tok.end)
+            if start < cursor or end < start:
+                continue
+
+            if start > cursor:
+                parts.append(expression[cursor:start])
+                promoted_positions.extend(source_positions[cursor:start])
+
+            replacement = tok.string
+            token_positions = list(source_positions[start:end])
             if tok.type == token.NUMBER and not tok.string.lower().endswith("j"):
                 is_integer_literal = bool(re.fullmatch(r"\d+", tok.string))
-                if is_integer_literal and previous_token_text == "**":
-                    promoted = tok.string
-                else:
-                    promoted = f'mpf("{tok.string}")'
-                tok = tokenize.TokenInfo(tok.type, promoted, tok.start, tok.end, tok.line)
-            tokens.append(tok)
-            if tok.type in {token.OP, token.NUMBER, token.NAME, token.STRING}:
-                previous_token_text = tok.string
+                if not (is_integer_literal and previous_token_text == "**"):
+                    prefix = 'mpf("'
+                    suffix = '")'
+                    replacement = f"{prefix}{tok.string}{suffix}"
+                    start_origin = (
+                        token_positions[0]
+                        if token_positions
+                        else min(source_length, source_positions[start])
+                    )
+                    if end < len(source_positions):
+                        end_origin = source_positions[end]
+                    elif token_positions:
+                        end_origin = min(token_positions[-1] + 1, source_length)
+                    else:
+                        end_origin = source_length
+                    token_positions = (
+                        [start_origin] * len(prefix)
+                        + token_positions
+                        + [end_origin] * len(suffix)
+                    )
 
-        return tokenize.untokenize(tokens)
+            parts.append(replacement)
+            promoted_positions.extend(token_positions)
+            cursor = end
+            if tok.type in {token.OP, token.NUMBER, token.NAME, token.STRING}:
+                previous_token_text = replacement
+
+        if cursor < len(expression):
+            parts.append(expression[cursor:])
+            promoted_positions.extend(source_positions[cursor:])
+
+        return "".join(parts), tuple(promoted_positions)
 
     @staticmethod
     def _format_result(value, digits: int) -> str:

@@ -1,6 +1,9 @@
 from typing import Any
 
-from arbitrary_precision_engine import ArbitraryPrecisionCalculatorEngine
+from arbitrary_precision_engine import (
+    ArbitraryPrecisionCalculatorEngine,
+    ExpressionSyntaxError,
+)
 from calculator_ui_window import CalculatorApp
 
 
@@ -85,6 +88,22 @@ class _FakeKeyEvent:
         self.keysym = keysym if keysym is not None else char
         self.state = state
         self.widget = widget
+
+
+class _UnpositionedEvaluationEngine:
+    """Motor que falla sin poder asociar el error a una posición."""
+
+    def create_evaluation_request(self, expression: str) -> str:
+        return expression
+
+    def evaluate_request(self, _request: str):
+        raise ValueError("fallo sin posición")
+
+    def clear_last_calculation(self):
+        return None
+
+    def can_expand_precision(self) -> bool:
+        return False
 
 
 class _PrecisionFailureEngine:
@@ -229,6 +248,64 @@ def check_syntax_normalization() -> None:
             )
         else:
             raise AssertionError(f"{expression!r} debio fallar con Error de sintaxis")
+
+
+def check_syntax_error_positions_use_original_formula() -> None:
+    cases = {
+        "1+*2": 2,
+        "sin(": 3,
+        "2+": 2,
+        "1..2": 2,
+        "5!+*2": 3,
+        "A%+*3": 3,
+        "√(2+)": 4,
+        "2(3+)": 4,
+        "  1 + * 2  ": 6,
+        "001+sin(": 7,
+    }
+
+    for expression, expected_position in cases.items():
+        try:
+            ArbitraryPrecisionCalculatorEngine().evaluate(expression)
+        except ExpressionSyntaxError as exc:
+            _assert(
+                str(exc) == "Error de sintaxis",
+                f"mensaje inesperado para {expression!r}: {exc}",
+            )
+            _assert(
+                exc.position == expected_position,
+                f"{expression!r} señaló {exc.position}, esperado {expected_position}",
+            )
+        else:
+            raise AssertionError(f"{expression!r} debió producir error sintáctico")
+
+
+def check_validation_and_runtime_error_positions() -> None:
+    cases = [
+        ("1+@2", "Expresión contiene caracteres inválidos", 2),
+        ("2+foo", "Identificador no permitido: foo", 2),
+        ("1+sin 30", "Falta '(' después de sin", 5),
+        ("sin 2+foo", "Falta '(' después de sin", 3),
+        ("1+pi(2)", "pi no es una función", 2),
+        ("2+1/0", "", 2),
+        ("1+factorial(-1)", "factorial requiere entero no negativo", 2),
+        ("(-1)!", "factorial requiere entero no negativo", 0),
+    ]
+
+    for expression, expected_message, expected_position in cases:
+        try:
+            ArbitraryPrecisionCalculatorEngine().evaluate(expression)
+        except (ValueError, ArithmeticError) as exc:
+            _assert(
+                str(exc) == expected_message,
+                f"mensaje inesperado para {expression!r}: {exc!r}",
+            )
+            _assert(
+                getattr(exc, "position", None) == expected_position,
+                f"{expression!r} no señaló la posición {expected_position}",
+            )
+        else:
+            raise AssertionError(f"{expression!r} debió fallar")
 
 
 def check_failed_evaluation_clears_previous_precision_state() -> None:
@@ -380,6 +457,70 @@ def check_physical_key_after_result_starts_new_formula() -> None:
     )
 
 
+def check_lateral_arrows_recover_finished_formula() -> None:
+    cases = [
+        (ArbitraryPrecisionCalculatorEngine, "1/3", "resultado"),
+        (_UnpositionedEvaluationEngine, "1+1", "error sin posición"),
+    ]
+    arrows = [
+        ("Left", lambda expression: len(expression), "derecho"),
+        ("Right", lambda _expression: 0, "izquierdo"),
+    ]
+
+    for engine_factory, expression, outcome in cases:
+        for keysym, expected_cursor, edge in arrows:
+            harness = _Harness(engine_factory())
+            harness.expr_var.set(expression)
+            CalculatorApp._calculate(harness)  # type: ignore[arg-type]
+            result_updates = list(harness.result_display.text_updates)
+
+            _assert(
+                harness._expr_inactive_after_result,
+                f"el {outcome} debe dejar la fórmula lista para recuperarse",
+            )
+            handled = CalculatorApp._on_inactive_result_key(
+                harness,
+                _FakeKeyEvent(char="", keysym=keysym),
+            )  # type: ignore[arg-type]
+
+            _assert(handled == "break", f"{keysym} debe consumir el evento")
+            _assert(
+                harness.expr_var.get() == expression,
+                f"{keysym} no debe borrar la fórmula tras un {outcome}",
+            )
+            _assert(
+                not harness._expr_inactive_after_result
+                and harness.expr_entry.state == "normal",
+                f"{keysym} debe restaurar la edición tras un {outcome}",
+            )
+            _assert(
+                harness.expr_entry.cursor == expected_cursor(expression),
+                f"{keysym} debe colocar el cursor en el extremo {edge}",
+            )
+            _assert(
+                harness.expr_entry.xview_calls[-1] == ("insert",),
+                f"{keysym} debe hacer visible el extremo {edge}",
+            )
+            _assert(
+                harness.expr_entry.focus_calls == 1,
+                f"{keysym} debe devolver el foco a la fórmula",
+            )
+            _assert(
+                harness.result_display.text_updates == result_updates,
+                f"{keysym} no debe reemplazar el {outcome} visible",
+            )
+
+    active = _Harness(ArbitraryPrecisionCalculatorEngine())
+    active.expr_var.set("123")
+    active.expr_entry.cursor = 2
+    handled = CalculatorApp._on_inactive_result_key(
+        active,
+        _FakeKeyEvent(char="", keysym="Left"),
+    )  # type: ignore[arg-type]
+    _assert(handled is None, "una fórmula activa debe conservar el manejo normal")
+    _assert(active.expr_entry.cursor == 2, "el handler alteró una fórmula activa")
+
+
 def check_button_insert_keeps_cursor_visible() -> None:
     harness = _Harness(ArbitraryPrecisionCalculatorEngine())
     expression = "12312312312312312312312312312312"
@@ -425,6 +566,64 @@ def check_calculate_error_marks_precision_exhausted() -> None:
         not harness.engine.can_expand_precision(),
         "la UI dejó vivo el cálculo anterior tras el error",
     )
+    _assert(
+        not harness._expr_inactive_after_result,
+        "el error sintáctico debe devolver la fórmula a edición",
+    )
+    _assert(
+        harness.expr_entry.state == "normal",
+        "la fórmula errónea debe quedar editable",
+    )
+    _assert(
+        harness.expr_entry.cursor == 3,
+        "el cursor debe señalar el paréntesis no cerrado de 'sin('",
+    )
+    _assert(
+        harness.expr_entry.xview_calls[-1] == ("insert",),
+        "la posición del error debe quedar visible",
+    )
+    _assert(
+        harness.expr_entry.focus_calls == 1 and harness.root.focus_calls == 0,
+        "el error sintáctico debe devolver el foco al campo de fórmula",
+    )
+
+
+def check_positioned_errors_focus_original_formula() -> None:
+    cases = [
+        ("1+@2", "Error: Expresión contiene caracteres inválidos", 2),
+        ("2+foo", "Error: Identificador no permitido: foo", 2),
+        ("1+sin 30", "Error: Falta '(' después de sin", 5),
+        ("1+pi(2)", "Error: pi no es una función", 2),
+        ("2+1/0", "Error: ZeroDivisionError", 2),
+        (
+            "1+factorial(-1)",
+            "Error: factorial requiere entero no negativo",
+            2,
+        ),
+    ]
+
+    for expression, expected_error, expected_position in cases:
+        harness = _Harness(ArbitraryPrecisionCalculatorEngine())
+        harness.expr_var.set(expression)
+        CalculatorApp._calculate(harness)  # type: ignore[arg-type]
+
+        _assert(
+            harness.result_display.text_updates[-1][0] == expected_error,
+            f"mensaje de UI inesperado para {expression!r}",
+        )
+        _assert(
+            not harness._expr_inactive_after_result
+            and harness.expr_entry.state == "normal",
+            f"{expression!r} debe volver a edición",
+        )
+        _assert(
+            harness.expr_entry.cursor == expected_position,
+            f"{expression!r} debe enfocar la posición {expected_position}",
+        )
+        _assert(
+            harness.expr_entry.focus_calls == 1 and harness.root.focus_calls == 0,
+            f"{expression!r} no devolvió el foco a la fórmula",
+        )
 
 
 def check_request_more_precision_failure_marks_exhausted() -> None:
@@ -467,6 +666,14 @@ def run_regressions() -> None:
         ("angle mode persistence", check_angle_mode_persistence),
         ("syntax normalization", check_syntax_normalization),
         (
+            "syntax errors use positions from the original formula",
+            check_syntax_error_positions_use_original_formula,
+        ),
+        (
+            "validation and runtime errors expose original positions",
+            check_validation_and_runtime_error_positions,
+        ),
+        (
             "failed evaluation clears active and conserves answer",
             check_failed_evaluation_clears_previous_precision_state,
         ),
@@ -487,12 +694,20 @@ def run_regressions() -> None:
             check_physical_key_after_result_starts_new_formula,
         ),
         (
+            "lateral arrows recover finished formula",
+            check_lateral_arrows_recover_finished_formula,
+        ),
+        (
             "button insert keeps cursor visible",
             check_button_insert_keeps_cursor_visible,
         ),
         (
             "calculate error marks precision exhausted",
             check_calculate_error_marks_precision_exhausted,
+        ),
+        (
+            "positioned errors focus the original formula",
+            check_positioned_errors_focus_original_formula,
         ),
         (
             "precision failure marks exhausted",

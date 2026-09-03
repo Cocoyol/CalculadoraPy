@@ -1278,7 +1278,11 @@ def check_ui_current_error_does_not_enable_result_context() -> None:
     )
     _assert(
         not harness._expr_inactive_after_result,
-        "un error no debe dejar la fórmula inactiva",
+        "un error sintáctico vigente debe devolver la fórmula a edición",
+    )
+    _assert(
+        harness.expr_entry.state == "normal" and harness.expr_entry.cursor == 3,
+        "la fórmula errónea debe quedar editable en el primer punto señalado",
     )
     _assert(
         not harness._valid_result_visible,
@@ -1748,8 +1752,8 @@ def check_error_after_result_conserves_answer_but_not_continuation() -> None:
 
     CalculatorApp._on_key(harness, "insert:+")  # type: ignore[arg-type]
     _assert(
-        harness.expr_var.get() == "+",
-        "tras un error los operadores no deben anteponer A",
+        harness.expr_var.get() == "sin+(",
+        "tras un error sintáctico el operador debe editar la fórmula sin anteponer A",
     )
 
 

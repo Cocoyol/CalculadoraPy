@@ -567,6 +567,18 @@ class CalculatorApp:
     def _on_inactive_result_key(self, event: tk.Event):
         if not self._expression_is_inactive():
             return None
+        if event.keysym in ("Left", "Right"):
+            # Las flechas recuperan la fórmula calculada en vez de iniciar
+            # una nueva: Izquierda entra por el extremo derecho y Derecha
+            # por el izquierdo, según la dirección desde la que se edita.
+            self._activate_expression_for_editing()
+            cursor_position = (
+                len(self.expr_var.get()) if event.keysym == "Left" else 0
+            )
+            self.expr_entry.icursor(cursor_position)
+            self.expr_entry.xview(tk.INSERT)
+            self.expr_entry.focus_set()
+            return "break"
         if event.keysym in ("Escape", "Return", "KP_Enter", "Tab"):
             return None
         # Solo Ctrl: en Windows el bit 0x0008 es NumLock (no Alt), por lo que
@@ -950,15 +962,34 @@ class CalculatorApp:
             ) as exc:
                 error_name = type(exc).__name__
                 msg = str(exc) if str(exc) else error_name
+                reported_position = getattr(exc, "position", None)
+                reported_expression = getattr(exc, "source_expression", expr)
+                error_position = (
+                    max(0, min(reported_position, len(expr)))
+                    if isinstance(reported_position, int)
+                    and reported_expression == expr
+                    else None
+                )
 
                 def _apply_error():
                     # Error vigente: limpia solo el cálculo activo y el
                     # contexto de continuación; ANS (o el fallback 0) queda.
+                    # Todo error con posición fiable devuelve la edición al
+                    # primer punto señalado en la fórmula original; si no hay
+                    # posición, finaliza la entrada y conserva las flechas.
                     self._clear_engine_precision_state()
                     self._last_engine_result = None
                     self.result_display.set_text(f"Error: {msg}")
                     self.result_display.mark_precision_exhausted()
                     self._valid_result_visible = False
+                    if error_position is None:
+                        self._deactivate_expression_after_result()
+                    else:
+                        self._expr_inactive_after_result = False
+                        self._set_expression_editable(True)
+                        self.expr_entry.icursor(error_position)
+                        self.expr_entry.xview(tk.INSERT)
+                        self.expr_entry.focus_set()
 
                 self._schedule_on_ui_thread(_apply_error, job_id=job_id)
             else:

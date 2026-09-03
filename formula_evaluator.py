@@ -1,6 +1,15 @@
 """Parseo y evaluación de expresiones para la calculadora científica."""
 
 import re
+from difflib import SequenceMatcher
+
+
+class ExpressionPositionError(ValueError):
+    """Error de fórmula asociado a un índice cero-basado del texto original."""
+
+    def __init__(self, message: str, position: int):
+        super().__init__(message)
+        self.position = position
 
 
 class FormulaEvaluator:
@@ -49,34 +58,165 @@ class FormulaEvaluator:
     _NON_INVOCABLE_IDENTIFIERS = _CONSTANT_IDENTIFIERS | {_ANSWER_IDENTIFIER}
 
     def prepare(self, expression: str) -> str:
+        prepared, _source_positions = self.prepare_with_source_map(expression)
+        return prepared
+
+    def prepare_with_source_map(
+        self, expression: str
+    ) -> tuple[str, tuple[int, ...]]:
+        """Normaliza y conserva el origen de cada carácter resultante.
+
+        El mapa permite traducir el ``SyntaxError.offset`` de Python a un
+        índice de la fórmula visible, incluso cuando la normalización agregó
+        multiplicaciones implícitas o expandió factoriales y porcentajes.
+        """
         if not expression or not expression.strip():
             raise ValueError("Expresión vacía")
 
         self._validate_raw_expression(expression)
-        return self._preprocess(expression)
+        return self._preprocess_with_source_map(expression)
 
     def _validate_raw_expression(self, expression: str):
-        if not self._ALLOWED_CHARS.fullmatch(expression):
-            raise ValueError("Expresión contiene caracteres inválidos")
-        if "__" in expression or any(c in expression for c in "[]{};:"):
-            raise ValueError("Expresión contiene operadores no permitidos")
+        for position, char in enumerate(expression):
+            if not self._ALLOWED_CHARS.fullmatch(char):
+                raise ExpressionPositionError(
+                    "Expresión contiene caracteres inválidos",
+                    position,
+                )
+
+        forbidden_positions = [
+            position
+            for position in (
+                expression.find("__"),
+                *(expression.find(char) for char in "[]{};:"),
+            )
+            if position >= 0
+        ]
+        if forbidden_positions:
+            raise ExpressionPositionError(
+                "Expresión contiene operadores no permitidos",
+                min(forbidden_positions),
+            )
 
     def _preprocess(self, expr: str) -> str:
-        expr = expr.strip()
+        prepared, _source_positions = self._preprocess_with_source_map(expr)
+        return prepared
 
-        expr = expr.replace("×", "*")
-        expr = expr.replace("÷", "/")
-        expr = expr.replace("−", "-")
+    def _preprocess_with_source_map(
+        self, expr: str
+    ) -> tuple[str, tuple[int, ...]]:
+        source_length = len(expr)
+        source_positions = list(range(source_length))
 
-        expr = self._normalize_answer_atom(expr)
-        expr = self._replace_factorial(expr)
-        expr = expr.replace("^", "**")
-        expr = expr.replace("√(", "sqrt(")
-        expr = self._replace_percentage(expr)
-        expr = self._insert_implicit_mult(expr)
-        self._validate_identifiers(expr)
+        def update(updated: str):
+            nonlocal expr, source_positions
+            source_positions = self._realign_source_positions(
+                expr,
+                updated,
+                source_positions,
+                source_length=source_length,
+            )
+            expr = updated
 
-        return expr
+        update(expr.strip())
+        update(expr.replace("×", "*"))
+        update(expr.replace("÷", "/"))
+        update(expr.replace("−", "-"))
+        update(self._normalize_answer_atom(expr))
+        update(self._replace_factorial(expr))
+        update(expr.replace("^", "**"))
+        update(expr.replace("√(", "sqrt("))
+        update(self._replace_percentage(expr))
+        update(self._insert_implicit_mult(expr))
+        self._validate_identifiers(
+            expr,
+            tuple(source_positions),
+            source_length=source_length,
+        )
+
+        return expr, tuple(source_positions)
+
+    @staticmethod
+    def _realign_source_positions(
+        before: str,
+        after: str,
+        source_positions: list[int],
+        *,
+        source_length: int,
+    ) -> list[int]:
+        """Propaga posiciones de origen a través de una transformación.
+
+        Los bloques conservados mantienen su posición exacta. En reemplazos,
+        los caracteres nuevos se distribuyen sobre el tramo original; las
+        inserciones puras se asocian al límite derecho. Así, por ejemplo, los
+        dos ``*`` producidos por ``^`` siguen apuntando al ``^`` visible.
+        """
+        if before == after:
+            return list(source_positions)
+
+        # Ruta lineal para las pasadas que solo insertan caracteres, como
+        # `AAA -> A*A*A` y la multiplicación implícita. Evita el coste
+        # cuadrático de SequenceMatcher sobre fórmulas repetitivas largas.
+        insertion_aligned = [-1] * len(after)
+        after_cursor = 0
+        for before_index, char in enumerate(before):
+            match_index = after.find(char, after_cursor)
+            if match_index < 0:
+                break
+            insertion_aligned[match_index] = source_positions[before_index]
+            after_cursor = match_index + 1
+        else:
+            next_boundary: int | None = None
+            for index in range(len(insertion_aligned) - 1, -1, -1):
+                if insertion_aligned[index] >= 0:
+                    next_boundary = insertion_aligned[index]
+                elif next_boundary is not None:
+                    insertion_aligned[index] = next_boundary
+                elif source_positions:
+                    insertion_aligned[index] = min(
+                        source_positions[-1] + 1,
+                        source_length,
+                    )
+                else:
+                    insertion_aligned[index] = 0
+            return insertion_aligned
+
+        aligned = [0] * len(after)
+        matcher = SequenceMatcher(None, before, after)
+
+        for tag, before_start, before_end, after_start, after_end in matcher.get_opcodes():
+            if tag == "equal":
+                aligned[after_start:after_end] = source_positions[
+                    before_start:before_end
+                ]
+                continue
+            if tag == "delete":
+                continue
+
+            new_count = after_end - after_start
+            old_positions = source_positions[before_start:before_end]
+            if tag == "replace" and old_positions:
+                old_count = len(old_positions)
+                for new_offset in range(new_count):
+                    old_offset = min(
+                        new_offset * old_count // new_count,
+                        old_count - 1,
+                    )
+                    aligned[after_start + new_offset] = old_positions[old_offset]
+                continue
+
+            if before_start < len(source_positions):
+                boundary = source_positions[before_start]
+            elif before_start > 0:
+                boundary = min(
+                    source_positions[before_start - 1] + 1,
+                    source_length,
+                )
+            else:
+                boundary = 0
+            aligned[after_start:after_end] = [boundary] * new_count
+
+        return aligned
 
     def _normalize_answer_atom(self, expr: str) -> str:
         """Pasada léxica del átomo de respuesta `A` (tabla 3.3 del plan ANS).
@@ -221,15 +361,77 @@ class FormulaEvaluator:
             expr = re.sub(pat, repl, expr)
         return expr
 
-    def _validate_identifiers(self, expr: str):
-        for name in re.findall(r"[A-Za-zπ]+", expr):
+    def _validate_identifiers(
+        self,
+        expr: str,
+        source_positions: tuple[int, ...],
+        *,
+        source_length: int,
+    ):
+        errors: list[tuple[int, str, int]] = []
+
+        for match in re.finditer(r"[A-Za-zπ]+", expr):
+            name = match.group()
             if name not in self._ALLOWED_IDENTIFIERS:
-                raise ValueError(f"Identificador no permitido: {name}")
+                errors.append(
+                    (
+                        match.start(),
+                        f"Identificador no permitido: {name}",
+                        self._source_cursor_position(
+                            source_positions,
+                            match.start(),
+                            source_length=source_length,
+                        ),
+                    )
+                )
 
         for function_name in self._FUNCTION_IDENTIFIERS:
-            if re.search(rf"\b{function_name}\b(?!\s*\()", expr):
-                raise ValueError(f"Falta '(' después de {function_name}")
+            for match in re.finditer(
+                rf"\b{function_name}\b(?!\s*\()",
+                expr,
+            ):
+                errors.append(
+                    (
+                        match.start(),
+                        f"Falta '(' después de {function_name}",
+                        self._source_cursor_position(
+                            source_positions,
+                            match.end(),
+                            source_length=source_length,
+                        ),
+                    )
+                )
 
         for non_invocable_name in self._NON_INVOCABLE_IDENTIFIERS:
-            if re.search(rf"\b{non_invocable_name}\b\s*\(", expr):
-                raise ValueError(f"{non_invocable_name} no es una función")
+            for match in re.finditer(
+                rf"\b{non_invocable_name}\b\s*\(",
+                expr,
+            ):
+                errors.append(
+                    (
+                        match.start(),
+                        f"{non_invocable_name} no es una función",
+                        self._source_cursor_position(
+                            source_positions,
+                            match.start(),
+                            source_length=source_length,
+                        ),
+                    )
+                )
+
+        if errors:
+            _prepared_start, message, position = min(errors, key=lambda item: item[0])
+            raise ExpressionPositionError(message, position)
+
+    @staticmethod
+    def _source_cursor_position(
+        source_positions: tuple[int, ...],
+        prepared_index: int,
+        *,
+        source_length: int,
+    ) -> int:
+        if prepared_index < len(source_positions):
+            return max(0, min(source_positions[prepared_index], source_length))
+        if source_positions:
+            return min(source_positions[-1] + 1, source_length)
+        return 0
