@@ -23,7 +23,7 @@ from calculator_config import initialize_config
 from calculator_ui import CalculatorApp
 
 
-AP_INITIAL_DIGITS = 120
+AP_INITIAL_DIGITS = 150
 AP_PRECISION_STEP = 120
 
 

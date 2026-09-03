@@ -230,6 +230,51 @@ def check_angle_mode_persistence() -> None:
     )
 
 
+def check_pi_scaled_trigonometric_values_are_exact() -> None:
+    radian_roots = (
+        "cos(pi/2)",
+        "cos(π/2)",
+        "cos(3*pi/2)",
+        "cos((pi+pi)/4)",
+        "sin(pi)",
+    )
+    for expression in radian_roots:
+        for initial_digits in (18, 42, 66):
+            engine = ArbitraryPrecisionCalculatorEngine(
+                initial_digits=initial_digits,
+                precision_step=24,
+            )
+            result = engine.evaluate(expression)
+            _assert(
+                result == "0",
+                f"{expression!r} con {initial_digits} dígitos devolvió {result!r}",
+            )
+            _assert(
+                not engine.can_expand_precision(),
+                f"{expression!r} no reconoció el cero como terminal",
+            )
+
+    engine = ArbitraryPrecisionCalculatorEngine(initial_digits=18, precision_step=24)
+    initial_nearby = engine.evaluate("cos(pi/2+1e-60)")
+    _assert(
+        initial_nearby != "0" and engine.can_expand_precision(),
+        "una perturbación de pi/2 no debe confundirse con el cero exacto",
+    )
+    expanded_nearby = engine.request_more_precision()
+    _assert(
+        expanded_nearby.startswith("-1.000000000000000000000000000000"),
+        f"la expansión no recuperó la perturbación de pi/2: {expanded_nearby!r}",
+    )
+
+    engine.angle_mode = "deg"
+    _assert(engine.evaluate("cos(90)") == "0", "cos(90) en DEG no fue exacto")
+    _assert(engine.evaluate("sin(180)") == "0", "sin(180) en DEG no fue exacto")
+    _assert(
+        engine.evaluate("cos(pi/2)") != "0",
+        "la optimización RAD se aplicó indebidamente en modo DEG",
+    )
+
+
 def check_syntax_normalization() -> None:
     expressions = ["sin(", "1..2", "2+", "sqrt("]
 
@@ -664,6 +709,10 @@ def check_stale_job_does_not_clear_loading() -> None:
 def run_regressions() -> None:
     checks = [
         ("angle mode persistence", check_angle_mode_persistence),
+        (
+            "pi-scaled trigonometric values are exact",
+            check_pi_scaled_trigonometric_values_are_exact,
+        ),
         ("syntax normalization", check_syntax_normalization),
         (
             "syntax errors use positions from the original formula",

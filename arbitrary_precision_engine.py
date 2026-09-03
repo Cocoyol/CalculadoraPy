@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import math
 import re
@@ -31,6 +32,96 @@ class ExpressionSyntaxError(ExpressionPositionError):
 
     def __init__(self, position: int):
         super().__init__("Error de sintaxis", position)
+
+
+class _PiScaledTrigTransformer(ast.NodeTransformer):
+    """Usa las variantes ``*pi`` cuando el argumento contiene un factor π.
+
+    La transformación conserva π de forma simbólica hasta la función. Así,
+    ``cos(pi/2)`` pasa a ``_cospi(1/2)`` y no evalúa primero una aproximación
+    finita de π que dejaría un residuo distinto a cada precisión.
+    """
+
+    _PI_FUNCTIONS = {"sin": "_sinpi", "cos": "_cospi"}
+    _PI_NAMES = {"pi", "π"}
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        node = self.generic_visit(node)
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in self._PI_FUNCTIONS
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            pi_coefficient = self._factor_pi(node.args[0])
+            if pi_coefficient is not None and not self._contains_pi(pi_coefficient):
+                node.func = ast.copy_location(
+                    ast.Name(
+                        id=self._PI_FUNCTIONS[node.func.id],
+                        ctx=ast.Load(),
+                    ),
+                    node.func,
+                )
+                node.args[0] = pi_coefficient
+        return node
+
+    @classmethod
+    def _contains_pi(cls, node: ast.AST) -> bool:
+        return any(
+            isinstance(part, ast.Name) and part.id in cls._PI_NAMES
+            for part in ast.walk(node)
+        )
+
+    @classmethod
+    def _factor_pi(cls, node: ast.AST) -> ast.AST | None:
+        """Devuelve ``node / π`` si puede factorizar un π explícito."""
+        if isinstance(node, ast.Name) and node.id in cls._PI_NAMES:
+            return ast.copy_location(ast.Constant(value=1), node)
+
+        if isinstance(node, ast.UnaryOp) and isinstance(
+            node.op, (ast.UAdd, ast.USub)
+        ):
+            operand = cls._factor_pi(node.operand)
+            if operand is not None:
+                return ast.copy_location(
+                    ast.UnaryOp(op=node.op, operand=operand),
+                    node,
+                )
+            return None
+
+        if not isinstance(node, ast.BinOp):
+            return None
+
+        left = cls._factor_pi(node.left)
+        right = cls._factor_pi(node.right)
+        if isinstance(node.op, (ast.Add, ast.Sub)):
+            if left is None or right is None:
+                return None
+            return ast.copy_location(
+                ast.BinOp(left=left, op=node.op, right=right),
+                node,
+            )
+
+        if isinstance(node.op, ast.Mult):
+            if left is not None:
+                return ast.copy_location(
+                    ast.BinOp(left=left, op=node.op, right=node.right),
+                    node,
+                )
+            if right is not None:
+                return ast.copy_location(
+                    ast.BinOp(left=node.left, op=node.op, right=right),
+                    node,
+                )
+            return None
+
+        if isinstance(node.op, ast.Div) and left is not None:
+            return ast.copy_location(
+                ast.BinOp(left=left, op=node.op, right=node.right),
+                node,
+            )
+
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,10 +247,20 @@ class MPMathProvider:
         self._angle_mode = mode
 
     @staticmethod
-    def _trig(fn, mode: str):
+    def _trig(fn, mode: str, *, pi_scaled_fn=None):
+        """Adapta una función directa al modo angular del nodo.
+
+        En DEG, ``sinpi`` y ``cospi`` aplican directamente la equivalencia
+        ``x grados = (x/180)·π`` y conservan exactos los ángulos notables.
+        En RAD, los múltiplos explícitos de π se transforman al compilar la
+        receta; los demás argumentos mantienen la evaluación habitual.
+        """
+
         def wrapped(x):
-            value = mp.radians(x) if mode == "deg" else x
-            return fn(value)
+            if mode == "deg" and pi_scaled_fn is not None:
+                return pi_scaled_fn(x / mp.mpf(180))
+
+            return fn(x)
 
         return wrapped
 
@@ -206,8 +307,8 @@ class MPMathProvider:
             raise ValueError("El modo debe ser 'rad' o 'deg'")
 
         namespace = {
-            "sin": self._trig(mp.sin, mode),
-            "cos": self._trig(mp.cos, mode),
+            "sin": self._trig(mp.sin, mode, pi_scaled_fn=mp.sinpi),
+            "cos": self._trig(mp.cos, mode, pi_scaled_fn=mp.cospi),
             "tan": self._trig(mp.tan, mode),
             "asin": self._inv_trig(mp.asin, mode),
             "acos": self._inv_trig(mp.acos, mode),
@@ -219,6 +320,8 @@ class MPMathProvider:
             "exp": mp.exp,
             "abs": abs,
             "mpf": mp.mpf,
+            "_sinpi": mp.sinpi,
+            "_cospi": mp.cospi,
             "π": mp.mpf(mp.pi),
             "pi": mp.mpf(mp.pi),
             "e": mp.mpf(mp.e),
@@ -322,7 +425,10 @@ class ArbitraryPrecisionCalculatorEngine:
         cambiarla.
         """
         prepared, compiled, source_positions = (
-            self._compile_expression_with_source_map(request.expression)
+            self._compile_expression_with_source_map(
+                request.expression,
+                angle_mode=request.angle_mode,
+            )
         )
         uses_answer = "A" in compiled.co_names
         recipe = CalculationRecipe(
@@ -651,7 +757,12 @@ class ArbitraryPrecisionCalculatorEngine:
         )
         return prepared, compiled
 
-    def _compile_expression_with_source_map(self, expression: str):
+    def _compile_expression_with_source_map(
+        self,
+        expression: str,
+        *,
+        angle_mode: str | None = None,
+    ):
         processed, source_positions = self._evaluator.prepare_with_source_map(
             expression
         )
@@ -672,7 +783,7 @@ class ArbitraryPrecisionCalculatorEngine:
             raise ExpressionSyntaxError(position) from exc
 
         try:
-            compiled = compile(prepared, "<calculator>", "eval")
+            syntax_tree = ast.parse(prepared, "<calculator>", "eval")
         except (SyntaxError, IndentationError) as exc:
             position = self._source_position_from_syntax_error(
                 expression,
@@ -680,6 +791,13 @@ class ArbitraryPrecisionCalculatorEngine:
                 exc,
             )
             raise ExpressionSyntaxError(position) from exc
+
+        mode = self._provider.angle_mode if angle_mode is None else angle_mode
+        if mode == "rad":
+            syntax_tree = _PiScaledTrigTransformer().visit(syntax_tree)
+            ast.fix_missing_locations(syntax_tree)
+
+        compiled = compile(syntax_tree, "<calculator>", "eval")
         return prepared, compiled, prepared_positions
 
     @staticmethod
